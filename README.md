@@ -4,6 +4,8 @@ A payment operations console by Cynthia Owolabi. Create a request, have an indep
 
 ![LedgerDesk payment overview](docs/dashboard.png)
 
+**New here? Follow the [installation guide](docs/INSTALLATION.md)** for cloning, database setup, VM access, troubleshooting, and verification.
+
 ## Run locally
 
 Use Node.js 22.13+ (22.x) or 24+, npm, and PostgreSQL 16+. Docker Compose can start the database:
