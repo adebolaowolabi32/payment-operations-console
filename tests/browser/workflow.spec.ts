@@ -13,6 +13,10 @@ test("maker submits, checker approves, payment confirms; mobile remains usable",
   await page.getByRole("button", { name: "New payment" }).click();
   await page.getByLabel("Amount (NGN)").fill("1250.50");
   await page.getByLabel("Payment reference").fill("Browser workflow invoice");
+  await page
+    .getByRole("button", { name: "Review payment", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText("₦1,250.50");
   await page.getByRole("button", { name: "Submit for approval" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
   const row = page
@@ -48,6 +52,7 @@ test("maker submits, checker approves, payment confirms; mobile remains usable",
   await page.getByRole("button", { name: "Close dialog" }).click();
   await expect(page.getByRole("status")).not.toBeVisible({ timeout: 10000 });
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: "docs/dashboard.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(
@@ -55,11 +60,19 @@ test("maker submits, checker approves, payment confirms; mobile remains usable",
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBeTruthy();
+  await expect(page.locator(".mobile-payment").first()).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: "docs/mobile.png", fullPage: true });
+  await page
+    .locator(".mobile-payment")
+    .filter({ hasText: "Browser workflow invoice" })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Toggle navigation" }).click();
   await page.getByRole("button", { name: "Audit trail", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Audit trail", exact: true }),
   ).toBeVisible();
-  await page.screenshot({ path: "docs/mobile.png", fullPage: true });
   expect(errors).toEqual([]);
 });

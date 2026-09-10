@@ -1,9 +1,16 @@
+import { api, ApiError, money, date, statusNames } from "./lib";
+import {
+  Badge,
+  Modal,
+  CreatePayment,
+  PaymentProgress,
+  MobilePayments,
+} from "./components";
 import "@fontsource-variable/dm-sans";
 import "@fontsource-variable/manrope";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  ArrowDownLeft,
   ArrowUpRight,
   ArrowRight,
   Check,
@@ -17,7 +24,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Settings2,
   ShieldCheck,
   Users,
   Wallet,
@@ -28,49 +34,7 @@ import {
 } from "lucide-react";
 import type { Payment, Workspace } from "./types";
 import "./styles.css";
-const money = (n: number) =>
-  new Intl.NumberFormat("en-NG", {
-    style: "currency",
-    currency: "NGN",
-    maximumFractionDigits: 2,
-  }).format(n / 100);
-const date = (n: number) =>
-  new Intl.DateTimeFormat("en-GB", {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(n);
-const statusNames: Record<string, string> = {
-  pending: "Awaiting approval",
-  queued: "Queued",
-  retrying: "Retry scheduled",
-  paid: "Paid",
-  failed: "Needs attention",
-  rejected: "Rejected",
-};
-class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-async function api<T>(url: string, body?: unknown, key?: string): Promise<T> {
-  const res = await fetch("/api" + url, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-With": "LedgerDesk",
-      ...(key ? { "Idempotency-Key": key } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new ApiError(res.status, data.error ?? "Request failed.");
-  return data;
-}
+import "./experience.css";
 const people = [
   {
     name: "Maya",
@@ -97,51 +61,6 @@ const people = [
     desc: "Read-only access",
   },
 ];
-function Badge({ status }: { status: string }) {
-  return (
-    <span className={"badge " + status}>
-      <span />
-      {statusNames[status] ?? status}
-    </span>
-  );
-}
-function Modal({
-  title,
-  children,
-  onClose,
-}: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = ref.current;
-    dialog?.showModal();
-    return () => dialog?.close();
-  }, []);
-  return (
-    <dialog
-      ref={ref}
-      onCancel={onClose}
-      onClick={(e) => {
-        if (e.target === ref.current) onClose();
-      }}
-    >
-      <div className="modal-head">
-        <h2>{title}</h2>
-        <button
-          className="icon-button"
-          aria-label="Close dialog"
-          onClick={onClose}
-        >
-          <X size={20} />
-        </button>
-      </div>
-      {children}
-    </dialog>
-  );
-}
 function Login({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState(people[2].email);
   const [password, setPassword] = useState("LedgerDemo!2026");
@@ -261,6 +180,11 @@ function App() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [showCreate, setShowCreate] = useState(false);
+  const [initialBeneficiary, setInitialBeneficiary] = useState<string>();
+  const [sort, setSort] = useState("newest");
+  const [syncError, setSyncError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastSynced, setLastSynced] = useState<number>();
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -269,10 +193,14 @@ function App() {
   const load = useCallback(async () => {
     try {
       setData(await api<Workspace>("/workspace"));
-      setError("");
+      setSyncError("");
+      setLastSynced(Date.now());
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) setData(null);
-      else setError((e as Error).message);
+      else
+        setSyncError(
+          "Could not refresh the workspace. Showing the last saved view.",
+        );
     } finally {
       setLoading(false);
     }
@@ -302,6 +230,25 @@ function App() {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (!mobile) return;
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMobile(false);
+        document.querySelector<HTMLButtonElement>(".mobile-toggle")?.focus();
+      }
+    };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [mobile]);
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
     }
   }
   if (loading)
@@ -341,6 +288,13 @@ function App() {
         .toLowerCase()
         .includes(search.toLowerCase()),
   );
+  rows.sort((a, b) =>
+    sort === "amount"
+      ? b.amount - a.amount
+      : sort === "oldest"
+        ? a.created_at - b.created_at
+        : b.created_at - a.created_at,
+  );
   const nav = [
     { name: "Overview", icon: LayoutDashboard },
     { name: "Payments", icon: CreditCard },
@@ -351,13 +305,28 @@ function App() {
   ];
   function navigate(name: string) {
     setPage(name);
+    setSelected(null);
+    setError("");
     setFilter("all");
     setSearch("");
     setMobile(false);
   }
   return (
     <div className="app">
-      <aside className={"sidebar " + (mobile ? "open" : "")}>
+      <a className="skip-link" href="#main">
+        Skip to workspace
+      </a>
+      {mobile && (
+        <button
+          className="nav-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setMobile(false)}
+        />
+      )}
+      <aside
+        id="workspace-sidebar"
+        className={"sidebar " + (mobile ? "open" : "")}
+      >
         <a
           className="brand"
           href="#"
@@ -383,6 +352,7 @@ function App() {
         <nav aria-label="Workspace navigation">
           {nav.map(({ name, icon: Icon }) => (
             <button
+              aria-current={page === name ? "page" : undefined}
               className={page === name ? "active" : ""}
               key={name}
               onClick={() => navigate(name)}
@@ -438,6 +408,8 @@ function App() {
             <button
               className="icon-button mobile-toggle"
               aria-label="Toggle navigation"
+              aria-expanded={mobile}
+              aria-controls="workspace-sidebar"
               onClick={() => setMobile(!mobile)}
             >
               <Menu />
@@ -450,7 +422,7 @@ function App() {
             <span className="status-dot" /> DEMO MODE
           </span>
         </header>
-        <main className="content" id="main">
+        <main className="content" id="main" tabIndex={-1}>
           <div className="page-heading">
             <div>
               <p className="eyebrow">CEDAR FINANCE / OPERATIONS</p>
@@ -471,12 +443,26 @@ function App() {
             </div>
             {canCreate &&
               ["Overview", "Payments", "Approvals"].includes(page) && (
-                <button className="primary" onClick={() => setShowCreate(true)}>
+                <button
+                  className="primary"
+                  onClick={() => {
+                    setInitialBeneficiary(undefined);
+                    setShowCreate(true);
+                  }}
+                >
                   <Plus size={17} />
                   New payment
                 </button>
               )}
           </div>
+          {syncError && (
+            <div className="warning inline-alert" role="status">
+              <span>{syncError}</span>
+              <button className="text-button" onClick={() => void refresh()}>
+                Try again
+              </button>
+            </div>
+          )}
           {error && (
             <div className="error inline-alert" role="alert">
               {error}
@@ -581,31 +567,46 @@ function App() {
                       : "Live status across your payment workflow."}
                   </p>
                 </div>
-                <button className="secondary small" onClick={() => void load()}>
+                <button
+                  className="secondary small"
+                  disabled={refreshing}
+                  onClick={() => void refresh()}
+                >
                   <RefreshCw size={14} />
-                  Refresh
+                  {refreshing ? "Refreshing…" : "Refresh"}
                 </button>
               </div>
               <div className="table-toolbar">
-                <div className="tabs" aria-label="Filter payments">
-                  {(page === "Approvals"
-                    ? ["all"]
-                    : ["all", "pending", "paid", "failed"]
-                  ).map((s) => (
-                    <button
-                      key={s}
-                      className={filter === s ? "active" : ""}
-                      onClick={() => setFilter(s)}
+                <div className="filter-controls">
+                  {page !== "Approvals" && (
+                    <label className="compact-select">
+                      <span className="sr-only">Payment status</span>
+                      <select
+                        aria-label="Payment status"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      >
+                        <option value="all">All statuses</option>
+                        {Object.entries(statusNames).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <label className="compact-select">
+                    <span className="sr-only">Sort payments</span>
+                    <select
+                      aria-label="Sort payments"
+                      value={sort}
+                      onChange={(e) => setSort(e.target.value)}
                     >
-                      {s === "all"
-                        ? "All payments"
-                        : s === "pending"
-                          ? "Pending"
-                          : s === "failed"
-                            ? "Failed"
-                            : "Paid"}
-                    </button>
-                  ))}
+                      <option value="newest">Newest first</option>
+                      <option value="oldest">Oldest first</option>
+                      <option value="amount">Highest amount</option>
+                    </select>
+                  </label>
                 </div>
                 <label className="search">
                   <Search size={16} />
@@ -617,7 +618,14 @@ function App() {
                   />
                 </label>
               </div>
-              <div className="table-scroll">
+              <MobilePayments
+                payments={rows}
+                onSelect={(id) => {
+                  setError("");
+                  setSelected(id);
+                }}
+              />
+              <div className="table-scroll desktop-payments">
                 <table>
                   <thead>
                     <tr>
@@ -691,23 +699,38 @@ function App() {
                     ))}
                   </tbody>
                 </table>
-                {!rows.length && (
-                  <div className="empty">
-                    <CheckCheck size={30} />
-                    <h3>
-                      {search ? "No matching payments" : "Nothing here yet"}
-                    </h3>
-                    <p>
-                      {search
-                        ? "Try another beneficiary or reference."
-                        : "New payment requests will appear here."}
-                    </p>
-                  </div>
-                )}
               </div>
+              {!rows.length && (
+                <div className="empty">
+                  <Search size={28} />
+                  <h3>
+                    {search || filter !== "all"
+                      ? "No payments match your filters"
+                      : "You're all caught up"}
+                  </h3>
+                  <p>
+                    {search || filter !== "all"
+                      ? "Try another reference, beneficiary, or payment status."
+                      : "New requests will appear here when they’re submitted."}
+                  </p>
+                  {(search || filter !== "all") && (
+                    <button
+                      className="secondary"
+                      onClick={() => {
+                        setSearch("");
+                        setFilter("all");
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="table-footer">
                 <span>
-                  Showing {rows.length} payment{rows.length !== 1 ? "s" : ""}
+                  {rows.length} of{" "}
+                  {page === "Approvals" ? pending.length : data.payments.length}{" "}
+                  payments
                 </span>
                 <span>
                   <ShieldCheck size={13} /> All amounts in Nigerian naira
@@ -782,7 +805,10 @@ function App() {
                   {canCreate && (
                     <button
                       className="secondary full"
-                      onClick={() => setShowCreate(true)}
+                      onClick={() => {
+                        setInitialBeneficiary(b.id);
+                        setShowCreate(true);
+                      }}
                     >
                       Create a payment
                       <ArrowUpRight size={15} />
@@ -897,7 +923,10 @@ function App() {
           )}
           <footer className="content-footer">
             <span>
-              <span className="status-dot" /> Connected to demo workspace
+              <span className={"status-dot " + (syncError ? "offline" : "")} />{" "}
+              {syncError
+                ? "Updates paused · reconnecting"
+                : "Updated " + (lastSynced ? date(lastSynced) : "just now")}
             </span>
             <span>Designed & built by Cynthia Owolabi</span>
           </footer>
@@ -906,6 +935,7 @@ function App() {
       {showCreate && (
         <CreatePayment
           data={data}
+          initialBeneficiary={initialBeneficiary}
           onClose={() => setShowCreate(false)}
           onCreated={async () => {
             setShowCreate(false);
@@ -986,127 +1016,6 @@ function AuditList({ events }: { events: Workspace["audit"] }) {
     </ol>
   );
 }
-function CreatePayment({
-  data,
-  onClose,
-  onCreated,
-}: {
-  data: Workspace;
-  onClose: () => void;
-  onCreated: () => Promise<void>;
-}) {
-  const [beneficiaryId, setBeneficiary] = useState(data.beneficiaries[0].id);
-  const [amount, setAmount] = useState("");
-  const [reference, setReference] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const key = useRef(crypto.randomUUID());
-  function changed() {
-    key.current = crypto.randomUUID();
-    setError("");
-  }
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await api("/payments", { beneficiaryId, amount, reference }, key.current);
-      await onCreated();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title="Create a payment"
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-    >
-      <form className="modal-body" onSubmit={submit}>
-        <p className="muted">
-          Send a request for review. A different person must approve it before
-          processing.
-        </p>
-        <label>
-          Beneficiary
-          <select
-            disabled={busy}
-            value={beneficiaryId}
-            onChange={(e) => {
-              changed();
-              setBeneficiary(e.target.value);
-            }}
-          >
-            {data.beneficiaries.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name} · •••• {b.account_suffix}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Amount (NGN)
-          <input
-            disabled={busy}
-            autoFocus
-            inputMode="decimal"
-            placeholder="0.00"
-            pattern="[0-9]+(\.[0-9]{1,2})?"
-            value={amount}
-            onChange={(e) => {
-              changed();
-              setAmount(e.target.value);
-            }}
-            required
-          />
-        </label>
-        <label>
-          Payment reference
-          <input
-            disabled={busy}
-            placeholder="e.g. September delivery services"
-            minLength={3}
-            maxLength={120}
-            value={reference}
-            onChange={(e) => {
-              changed();
-              setReference(e.target.value);
-            }}
-            required
-          />
-        </label>
-        <div className="info">
-          <ShieldCheck size={18} />
-          <span>
-            You are the maker for this request. You cannot approve it yourself.
-          </span>
-        </div>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="secondary"
-            onClick={onClose}
-            disabled={busy}
-          >
-            Cancel
-          </button>
-          <button className="primary" disabled={busy}>
-            {busy ? "Submitting…" : "Submit for approval"}
-            <ArrowRight size={16} />
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
 function PaymentDetail({
   payment: p,
   data,
@@ -1128,7 +1037,7 @@ function PaymentDetail({
   const [reason, setReason] = useState("");
   const canReview = ["admin", "checker"].includes(data.user.role);
   return (
-    <Modal title="Payment details" onClose={onClose}>
+    <Modal title="Payment details" onClose={onClose} busy={busy}>
       <div className="modal-body">
         {error && (
           <p className="error" role="alert">
@@ -1143,6 +1052,7 @@ function PaymentDetail({
           <h2>{money(p.amount)}</h2>
           <Badge status={p.status} />
         </div>
+        <PaymentProgress payment={p} />
         <dl className="detail-grid">
           <dt>Reference</dt>
           <dd>{p.reference}</dd>
@@ -1206,10 +1116,16 @@ function PaymentDetail({
                 <button
                   className="primary"
                   disabled={busy}
-                  onClick={() => onReview("approve")}
+                  onClick={() =>
+                    reject ? setReject(false) : onReview("approve")
+                  }
                 >
                   <Check size={16} />
-                  {busy ? "Saving…" : "Approve payment"}
+                  {busy
+                    ? "Saving…"
+                    : reject
+                      ? "Cancel rejection"
+                      : "Approve payment"}
                 </button>
               </div>
             </div>

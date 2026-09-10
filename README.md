@@ -20,7 +20,9 @@ LedgerDesk makes these cases visible and testable:
 - Bounded retries and a provider simulator that can accept a payment before timing out.
 - Reconciliation using a stable payment key and a unique simulated provider receipt.
 - Audit records protected against updates and deletions by SQLite triggers.
-- Responsive dashboard, payment review, beneficiary directory, and system-health controls.
+- Responsive dashboard, readable mobile payment cards, beneficiary directory, and system-health controls.
+- Two-step creation with a review summary, preserved recipient context, and draft-discard confirmation.
+- Status/search filters, sorting, payment progress, and persistent action-error feedback.
 
 ## Run locally
 
@@ -57,7 +59,7 @@ The role shortcuts on the login page select an email; they do not bypass authent
 
 ## Five-minute walkthrough
 
-1. Sign in as **Maya**, select **New payment**, choose a beneficiary, and submit an amount and reference.
+1. Sign in as **Maya**, select **New payment**, choose a beneficiary, and enter an amount and reference. Select **Review payment**, check the summary, then submit.
 2. Open the payment. There is no self-approval control, and the API independently rejects unauthorized review.
 3. Sign out and sign in as **Daniel**. Open the request under **Approvals**, then approve it. The worker confirms it within a few seconds.
 4. Open **Audit trail** to see creation, approval, and provider confirmation with their actors.
@@ -91,7 +93,7 @@ stateDiagram-v2
     failed --> queued: Authorized manual retry
 ```
 
-Read [the design decisions and failure analysis](docs/ARCHITECTURE.md) and [the API contract](docs/API.md).
+Read [the design decisions and failure analysis](docs/ARCHITECTURE.md), [the API contract](docs/API.md), and [the prioritized backend roadmap](docs/BACKEND-ROADMAP.md).
 
 ## Validation
 
@@ -104,7 +106,7 @@ npm run test:e2e
 
 The domain/API suite covers integer money validation, idempotency conflicts, role enforcement, self-approval, stale review, transaction rollback, rejection, timeout reconciliation, retry exhaustion, immutable audit operations, session revocation/expiry, and recovery after restart.
 
-The browser test signs in as a maker, creates a payment, verifies self-approval is unavailable, switches to a checker, approves, and waits for confirmation. It also checks mobile viewport overflow and navigation. Screenshots are generated in `docs/`.
+The browser tests cover recipient preselection, review/edit, draft protection, filters, mobile navigation, and persistent errors. The end-to-end workflow signs in as a maker, creates a payment, verifies self-approval is unavailable, switches to a checker, approves, and waits for confirmation. It also checks mobile viewport overflow and navigation. Screenshots are generated in `docs/`.
 
 ## Configuration
 
