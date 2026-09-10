@@ -1,4 +1,6 @@
 export type User = {
+  org_id: string;
+  org_name?: string;
   id: string;
   name: string;
   email: string;
@@ -12,7 +14,15 @@ export type Payment = {
   account_suffix: string;
   amount: number;
   reference: string;
-  status: "pending" | "queued" | "retrying" | "paid" | "failed" | "rejected";
+  status:
+    | "pending"
+    | "queued"
+    | "retrying"
+    | "paid"
+    | "failed"
+    | "rejected"
+    | "reconciling"
+    | "declined";
   created_by: string;
   creator_name: string;
   reviewer_name: string | null;
@@ -36,7 +46,15 @@ export type Audit = {
 };
 export type Workspace = {
   user: User;
-  users: User[];
+  memberships: { id: string; name: string; role: User["role"] }[];
+  summary: {
+    total: number;
+    amount: number;
+    byStatus: Record<string, { count: number; amount: number }>;
+  };
+  paymentCursor: string | null;
+  auditCursor: string | null;
+  beneficiaryCursor: string | null;
   payments: Payment[];
   beneficiaries: {
     id: string;
@@ -48,4 +66,15 @@ export type Workspace = {
   audit: Audit[];
   providerMode: string;
   serverTime: number;
+};
+
+export type Page<T> = { items: T[]; nextCursor: string | null };
+export type Attempt = {
+  id: number;
+  operation: string;
+  outcome: string;
+  detail: string;
+  started_at: number;
+  stale: boolean;
+  request_id: string;
 };

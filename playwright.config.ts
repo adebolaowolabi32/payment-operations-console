@@ -5,7 +5,7 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: "http://127.0.0.1:3002", trace: "retain-on-failure" },
   webServer: {
-    command: "PORT=3002 DB_PATH=:memory: npm start",
+    command: "node --import tsx tests/browser-server.ts",
     url: "http://127.0.0.1:3002/api/health",
     reuseExistingServer: false,
   },

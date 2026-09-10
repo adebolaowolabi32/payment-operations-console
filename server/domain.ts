@@ -1,27 +1,31 @@
-import { DatabaseSync } from "node:sqlite";
-import {
-  createHash,
-  randomBytes,
-  randomUUID,
-  scryptSync,
-  timingSafeEqual,
-} from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-
+import { Database, one, type Queryable } from "./db.js";
+import { hash, passwordHash, passwordMatches, encrypt } from "./security.js";
+import { captureContext, requestId, span } from "./telemetry.js";
 export type Role = "maker" | "checker" | "admin" | "viewer";
-export type User = { id: string; name: string; email: string; role: Role };
+export type User = {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  org_id: string;
+  org_name?: string;
+};
 export type Payment = {
   id: string;
+  org_id: string;
   beneficiary_id: string;
   amount: number;
   reference: string;
-  status: "pending" | "queued" | "retrying" | "paid" | "failed" | "rejected";
+  status: string;
   created_by: string;
   reviewed_by: string | null;
   reason: string | null;
   version: number;
   created_at: number;
   updated_at: number;
+  trace_context: Record<string, string>;
 };
 export class AppError extends Error {
   constructor(
@@ -31,7 +35,7 @@ export class AppError extends Error {
     super(message);
   }
 }
-export const demoUsers: User[] = [
+export const demoUsers = [
   {
     id: "usr_maya",
     name: "Maya Johnson",
@@ -56,227 +60,304 @@ export const demoUsers: User[] = [
     email: "alex@ledgerdesk.demo",
     role: "viewer",
   },
-];
-export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-const inputSchema = z
+] as const;
+export const roles = z.enum(["maker", "checker", "admin", "viewer"]);
+export const states = [
+  "pending",
+  "queued",
+  "retrying",
+  "reconciling",
+  "paid",
+  "declined",
+  "failed",
+  "rejected",
+] as const;
+const paymentInput = z
   .object({
     beneficiaryId: z.string().min(1),
-    amount: z
-      .string()
-      .regex(
-        /^(0|[1-9]\d{0,7})(\.\d{1,2})?$/,
-        "Use a positive amount with at most two decimal places.",
-      ),
+    amount: z.string().regex(/^(0|[1-9]\d{0,7})(\.\d{1,2})?$/),
     reference: z.string().trim().min(3).max(120),
   })
   .strict();
+const strongPassword = z.string().min(12).max(200);
+export const detailSelect = `SELECT p.*,b.name beneficiary_name,b.bank,b.account_suffix,u.name creator_name,r.name reviewer_name,j.attempts_cycle attempts,j.next_at,j.last_error FROM payments p JOIN beneficiaries b ON b.org_id=p.org_id AND b.id=p.beneficiary_id JOIN users u ON u.id=p.created_by LEFT JOIN users r ON r.id=p.reviewed_by LEFT JOIN jobs j ON j.payment_id=p.id`;
 export class Store {
-  db: DatabaseSync;
   constructor(
-    path: string,
+    public db: Database,
     public now: () => number = Date.now,
-  ) {
-    this.db = new DatabaseSync(path);
-    this.db
-      .exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, role TEXT NOT NULL CHECK(role IN ('maker','checker','admin','viewer')), password_hash TEXT NOT NULL, salt TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS beneficiaries(id TEXT PRIMARY KEY,name TEXT NOT NULL,bank TEXT NOT NULL,account_suffix TEXT NOT NULL,category TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS payments(id TEXT PRIMARY KEY, beneficiary_id TEXT NOT NULL REFERENCES beneficiaries(id), amount INTEGER NOT NULL CHECK(amount > 0 AND amount <= 9999999999), reference TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','queued','retrying','paid','failed','rejected')),created_by TEXT NOT NULL REFERENCES users(id),reviewed_by TEXT REFERENCES users(id),reason TEXT,version INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,CHECK(reviewed_by IS NULL OR reviewed_by != created_by));
-      CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,payment_id TEXT REFERENCES payments(id),actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
-      CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'Audit records are append-only'); END;
-      CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'Audit records are append-only'); END;
-      CREATE TABLE IF NOT EXISTS idempotency(actor TEXT NOT NULL,key TEXT NOT NULL,fingerprint TEXT NOT NULL,payment_id TEXT NOT NULL REFERENCES payments(id),PRIMARY KEY(actor,key));
-      CREATE TABLE IF NOT EXISTS jobs(payment_id TEXT PRIMARY KEY REFERENCES payments(id),attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL,done INTEGER NOT NULL DEFAULT 0,last_error TEXT);
-      CREATE TABLE IF NOT EXISTS provider_receipts(payment_id TEXT PRIMARY KEY REFERENCES payments(id),receipt TEXT NOT NULL,created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-      INSERT OR IGNORE INTO settings VALUES('provider_mode','healthy');
-      CREATE INDEX IF NOT EXISTS audit_payment ON audit(payment_id,id);
-      CREATE INDEX IF NOT EXISTS jobs_due ON jobs(done,next_at);
-    `);
-  }
-  transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const value = fn();
-      this.db.exec("COMMIT");
-      return value;
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
-  }
-  audit(
+  ) {}
+  async audit(
+    q: Queryable,
+    org: string,
     actor: string,
     action: string,
     detail: string,
-    paymentId: string | null = null,
+    payment: string | null = null,
   ) {
-    this.db
-      .prepare(
-        "INSERT INTO audit(payment_id,actor,action,detail,created_at) VALUES(?,?,?,?,?)",
-      )
-      .run(paymentId, actor, action, detail, this.now());
+    await q.query(
+      "INSERT INTO audit(org_id,payment_id,actor,action,detail,request_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",
+      [org, payment, actor, action, detail, requestId(), this.now()],
+    );
   }
-  seed(password: string, examples = true) {
-    if (this.db.prepare("SELECT id FROM users LIMIT 1").get()) return;
-    this.transaction(() => {
-      for (const u of demoUsers) {
-        const salt = randomBytes(16).toString("hex");
-        this.db
-          .prepare("INSERT INTO users VALUES(?,?,?,?,?,?)")
-          .run(
-            u.id,
-            u.name,
-            u.email,
-            u.role,
-            scryptSync(password, salt, 64).toString("hex"),
-            salt,
-          );
+  async seed(password: string, examples = true) {
+    const records = await Promise.all(
+      demoUsers.map(async (u) => ({ ...u, ...(await passwordHash(password)) })),
+    );
+    await this.db.tx(async (q) => {
+      await q.query(
+        "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':seed'))",
+      );
+      if (await one(q, "SELECT id FROM organizations LIMIT 1")) return;
+      await q.query(
+        "INSERT INTO organizations VALUES('org_cedar','Cedar Finance','healthy'),('org_harbor','Harbor Labs','healthy')",
+      );
+      for (const u of records) {
+        await q.query(
+          "INSERT INTO users(id,name,email,password_hash,salt) VALUES($1,$2,$3,$4,$5)",
+          [u.id, u.name, u.email, u.password_hash, u.salt],
+        );
+        await q.query("INSERT INTO memberships VALUES($1,$2,$3,true)", [
+          "org_cedar",
+          u.id,
+          u.role,
+        ]);
       }
-      const stmt = this.db.prepare(
-        "INSERT INTO beneficiaries VALUES(?,?,?,?,?)",
+      await q.query(
+        "INSERT INTO memberships VALUES('org_harbor','usr_amara','admin',true)",
       );
-      stmt.run(
-        "ben_atlas",
-        "Atlas Logistics",
-        "Demo Commercial Bank",
-        "4821",
-        "Logistics",
+      for (const org of ["org_cedar", "org_harbor"]) {
+        for (const b of [
+          [
+            "ben_atlas",
+            "Atlas Logistics",
+            "Demo Commercial Bank",
+            "4821",
+            "Logistics",
+          ],
+          [
+            "ben_north",
+            "Northstar Studio",
+            "Demo Trust Bank",
+            "9014",
+            "Creative services",
+          ],
+          [
+            "ben_cloud",
+            "Cloudline Systems",
+            "Demo Commercial Bank",
+            "2039",
+            "Software",
+          ],
+          [
+            "ben_oak",
+            "Oak & Bloom",
+            "Demo Trust Bank",
+            "7712",
+            "Office supplies",
+          ],
+        ])
+          await q.query("INSERT INTO beneficiaries VALUES($1,$2,$3,$4,$5,$6)", [
+            b[0],
+            org,
+            ...b.slice(1),
+          ]);
+        await this.audit(
+          q,
+          org,
+          "system",
+          "workspace.created",
+          "Synthetic workspace initialized.",
+        );
+      }
+      if (examples) {
+        for (const [i, b] of [
+          "ben_atlas",
+          "ben_north",
+          "ben_cloud",
+          "ben_oak",
+        ].entries()) {
+          const id = "pay_" + randomUUID();
+          await q.query(
+            "INSERT INTO payments(id,org_id,beneficiary_id,amount,reference,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8)",
+            [
+              id,
+              "org_cedar",
+              b,
+              [24500000, 18000000, 8950000, 3275000][i],
+              [
+                "September delivery services",
+                "Brand design — milestone 2",
+                "Cloud hosting subscription",
+                "Office supplies replenishment",
+              ][i],
+              "pending",
+              "usr_maya",
+              this.now() + i,
+            ],
+          );
+          await this.audit(
+            q,
+            "org_cedar",
+            "usr_maya",
+            "payment.created",
+            "Submitted for independent approval.",
+            id,
+          );
+          if (i === 3) {
+            await q.query(
+              "UPDATE payments SET status='rejected',reviewed_by='usr_daniel',reason='Correct the invoice reference',version=2 WHERE id=$1",
+              [id],
+            );
+            await this.audit(
+              q,
+              "org_cedar",
+              "usr_daniel",
+              "payment.rejected",
+              "Correct the invoice reference",
+              id,
+            );
+          }
+        }
+      }
+    });
+  }
+  async authorize(
+    q: Queryable,
+    u: User,
+    allowed: Role[] = ["maker", "checker", "admin", "viewer"],
+  ) {
+    const row = await one(
+      q,
+      "SELECT role FROM memberships WHERE org_id=$1 AND user_id=$2 AND active=true FOR SHARE",
+      [u.org_id, u.id],
+    );
+    if (!row || !allowed.includes(row.role))
+      throw new AppError(403, "Your membership does not permit this action.");
+    return row.role as Role;
+  }
+  async throttle(key: string, limit = 20) {
+    const row = await one(
+      this.db.pool,
+      `INSERT INTO throttle VALUES($1,1,$2) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN throttle.expires_at<$3 THEN 1 ELSE throttle.count+1 END,expires_at=CASE WHEN throttle.expires_at<$3 THEN $2 ELSE throttle.expires_at END RETURNING count`,
+      [hash(key), this.now() + 60000, this.now()],
+    );
+    if (row.count > limit)
+      throw new AppError(429, "Too many attempts. Try again in a minute.");
+    await this.db.pool.query(
+      "DELETE FROM throttle WHERE key IN (SELECT key FROM throttle WHERE expires_at<$1 LIMIT 100)",
+      [this.now()],
+    );
+  }
+  async login(email: string, password: string) {
+    const record = await one(
+      this.db.pool,
+      "SELECT * FROM users WHERE email=$1",
+      [email.toLowerCase()],
+    );
+    if (!(await passwordMatches(password, record)))
+      throw new AppError(401, "Email or password is incorrect.");
+    return this.db.tx(async (q) => {
+      const latest = await one(q, "SELECT * FROM users WHERE id=$1 FOR SHARE", [
+        record.id,
+      ]);
+      if (latest.credential_version !== record.credential_version)
+        throw new AppError(401, "Credentials changed. Sign in again.");
+      const membership = await one(
+        q,
+        "SELECT * FROM memberships WHERE user_id=$1 AND active=true ORDER BY org_id LIMIT 1",
+        [record.id],
       );
-      stmt.run(
-        "ben_north",
-        "Northstar Studio",
-        "Demo Trust Bank",
-        "9014",
-        "Creative services",
+      if (!membership)
+        throw new AppError(403, "No active workspace membership.");
+      const token = randomBytes(32).toString("hex");
+      await q.query("INSERT INTO sessions VALUES($1,$2,$3,$4,$5)", [
+        hash(token),
+        record.id,
+        membership.org_id,
+        record.credential_version,
+        this.now() + 8 * 3600000,
+      ]);
+      await this.audit(
+        q,
+        membership.org_id,
+        record.id,
+        "session.started",
+        "Signed in.",
       );
-      stmt.run(
-        "ben_cloud",
-        "Cloudline Systems",
-        "Demo Commercial Bank",
-        "2039",
-        "Software",
-      );
-      stmt.run(
-        "ben_oak",
-        "Oak & Bloom",
-        "Demo Trust Bank",
-        "7712",
-        "Office supplies",
-      );
-      this.audit(
-        "system",
-        "workspace.created",
-        "Synthetic demo workspace initialized.",
+      return {
+        token,
+        user: {
+          id: record.id,
+          name: record.name,
+          email: record.email,
+          role: membership.role,
+          org_id: membership.org_id,
+        },
+      };
+    });
+  }
+  async user(token: string): Promise<User | undefined> {
+    return one(
+      this.db.pool,
+      `SELECT u.id,u.name,u.email,m.role,s.org_id,o.name org_name FROM sessions s JOIN users u ON u.id=s.user_id AND u.credential_version=s.credential_version JOIN memberships m ON m.user_id=u.id AND m.org_id=s.org_id AND m.active=true JOIN organizations o ON o.id=s.org_id WHERE s.token=$1 AND s.expires_at>$2`,
+      [hash(token), this.now()],
+    );
+  }
+  async logout(token: string) {
+    await this.db.pool.query("DELETE FROM sessions WHERE token=$1", [
+      hash(token),
+    ]);
+  }
+  async switchOrg(user: User, token: string, org: string) {
+    return this.db.tx(async (q) => {
+      await this.authorize(q, { ...user, org_id: org });
+      await q.query(
+        "UPDATE sessions SET org_id=$1 WHERE token=$2 AND user_id=$3",
+        [org, hash(token), user.id],
       );
     });
-    if (examples) {
-      const maker = demoUsers[0],
-        checker = demoUsers[1];
-      const a = this.create(
-        maker,
-        {
-          beneficiaryId: "ben_atlas",
-          amount: "245000",
-          reference: "September delivery services",
-        },
-        "seed-atlas-payment",
-      );
-      this.create(
-        maker,
-        {
-          beneficiaryId: "ben_north",
-          amount: "180000",
-          reference: "Brand design — milestone 2",
-        },
-        "seed-north-payment",
-      );
-      const c = this.create(
-        maker,
-        {
-          beneficiaryId: "ben_cloud",
-          amount: "89500",
-          reference: "Cloud hosting subscription",
-        },
-        "seed-cloud-payment",
-      );
-      this.review(checker, c.id, "approve", c.version);
-      this.tick();
-      const d = this.create(
-        maker,
-        {
-          beneficiaryId: "ben_oak",
-          amount: "32750",
-          reference: "Office supplies replenishment",
-        },
-        "seed-oak-payment",
-      );
-      this.review(
-        checker,
-        d.id,
-        "reject",
-        d.version,
-        "Please attach the correct purchase-order reference.",
-      );
-      // Keep two approval requests ready for the guided demo.
-      void a;
-    }
   }
-  login(email: string, password: string) {
-    const row = this.db
-      .prepare("SELECT * FROM users WHERE email=?")
-      .get(email.toLowerCase()) as
-      (User & { salt: string; password_hash: string }) | undefined;
-    const actual = scryptSync(
-      password,
-      row?.salt ?? "nonexistent-user-salt",
-      64,
-    );
-    if (!row || !timingSafeEqual(actual, Buffer.from(row.password_hash, "hex")))
-      throw new AppError(401, "Email or password is incorrect.");
-    const token = randomBytes(32).toString("hex");
-    this.db
-      .prepare("DELETE FROM sessions WHERE expires_at <= ?")
-      .run(this.now());
-    this.db
-      .prepare("INSERT INTO sessions VALUES(?,?,?)")
-      .run(hash(token), row.id, this.now() + 8 * 60 * 60 * 1000);
-    this.audit(row.id, "session.started", "Signed in.");
+  async bootstrap(u: User) {
+    await this.authorize(this.db.pool, u);
     return {
-      token,
-      user: { id: row.id, name: row.name, email: row.email, role: row.role },
+      user: u,
+      memberships: await this.db.query(
+        "SELECT o.id,o.name,m.role FROM memberships m JOIN organizations o ON o.id=m.org_id WHERE m.user_id=$1 AND m.active=true ORDER BY o.id",
+        [u.id],
+      ),
+      providerMode: (
+        await one(
+          this.db.pool,
+          "SELECT provider_mode FROM organizations WHERE id=$1",
+          [u.org_id],
+        )
+      ).provider_mode,
     };
   }
-  user(token: string): User | undefined {
-    return this.db
-      .prepare(
-        "SELECT u.id,u.name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?",
-      )
-      .get(hash(token), this.now()) as User | undefined;
+  async payment(
+    u: User,
+    id: string,
+    q: Queryable = this.db.pool,
+    lock = false,
+  ): Promise<Payment> {
+    await this.authorize(q, u);
+    const row = await one<Payment>(
+      q,
+      lock
+        ? "SELECT * FROM payments WHERE org_id=$1 AND id=$2 FOR UPDATE"
+        : detailSelect + " WHERE p.org_id=$1 AND p.id=$2",
+      [u.org_id, id],
+    );
+    if (!row) throw new AppError(404, "Payment not found.");
+    return row;
   }
-  logout(token: string) {
-    this.db.prepare("DELETE FROM sessions WHERE token=?").run(hash(token));
-  }
-  allow(user: User, roles: Role[]) {
-    if (!roles.includes(user.role))
-      throw new AppError(403, "Your role cannot perform this action.");
-  }
-  payment(id: string): Payment {
-    const p = this.db.prepare("SELECT * FROM payments WHERE id=?").get(id) as
-      Payment | undefined;
-    if (!p) throw new AppError(404, "Payment not found.");
-    return p;
-  }
-  create(user: User, raw: unknown, key: string) {
-    this.allow(user, ["maker", "admin"]);
+  async create(u: User, raw: unknown, key: string) {
+    const input = paymentInput.parse(raw);
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(key))
       throw new AppError(400, "A valid Idempotency-Key is required.");
-    const input = inputSchema.parse(raw);
-    const [whole, fraction = ""] = input.amount.split(".");
-    const amount = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
-    if (amount <= 0)
-      throw new AppError(400, "Amount must be greater than zero.");
+    const [whole, part = ""] = input.amount.split(".");
+    const amount = Number(whole) * 100 + Number(part.padEnd(2, "0"));
+    if (amount < 1) throw new AppError(400, "Amount must be positive.");
     const fingerprint = hash(
       JSON.stringify({
         beneficiaryId: input.beneficiaryId,
@@ -284,232 +365,627 @@ export class Store {
         reference: input.reference,
       }),
     );
-    return this.transaction(() => {
-      const prev = this.db
-        .prepare("SELECT * FROM idempotency WHERE actor=? AND key=?")
-        .get(user.id, key) as
-        { fingerprint: string; payment_id: string } | undefined;
-      if (prev) {
-        if (prev.fingerprint !== fingerprint)
-          throw new AppError(
-            409,
-            "This request key was already used for different payment details.",
-          );
-        return this.payment(prev.payment_id);
-      }
-      if (
-        !this.db
-          .prepare("SELECT id FROM beneficiaries WHERE id=?")
-          .get(input.beneficiaryId)
-      )
-        throw new AppError(400, "Choose an existing beneficiary.");
-      const id = "pay_" + randomUUID(),
-        now = this.now();
-      this.db
-        .prepare(
-          "INSERT INTO payments(id,beneficiary_id,amount,reference,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-        )
-        .run(
-          id,
-          input.beneficiaryId,
-          amount,
-          input.reference,
-          "pending",
-          user.id,
-          now,
-          now,
+    return span("payment.create", { org: u.org_id }, () =>
+      this.db.tx(async (q) => {
+        await this.authorize(q, u, ["maker", "admin"]);
+        await q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          u.org_id + u.id + key,
+        ]);
+        const prior = await one(
+          q,
+          "SELECT * FROM idempotency WHERE org_id=$1 AND actor=$2 AND key=$3",
+          [u.org_id, u.id, key],
         );
-      this.db
-        .prepare("INSERT INTO idempotency VALUES(?,?,?,?)")
-        .run(user.id, key, fingerprint, id);
-      this.audit(
-        user.id,
-        "payment.created",
-        "Submitted for independent approval.",
-        id,
-      );
-      return this.payment(id);
-    });
+        if (prior) {
+          if (prior.fingerprint !== fingerprint)
+            throw new AppError(
+              409,
+              "Request key already used with different details.",
+            );
+          return this.payment(u, prior.payment_id, q);
+        }
+        if (
+          !(await one(
+            q,
+            "SELECT id FROM beneficiaries WHERE org_id=$1 AND id=$2",
+            [u.org_id, input.beneficiaryId],
+          ))
+        )
+          throw new AppError(400, "Choose a beneficiary in your workspace.");
+        const id = "pay_" + randomUUID();
+        await q.query(
+          "INSERT INTO payments(id,org_id,beneficiary_id,amount,reference,status,created_by,created_at,updated_at,trace_context) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)",
+          [
+            id,
+            u.org_id,
+            input.beneficiaryId,
+            amount,
+            input.reference,
+            "pending",
+            u.id,
+            this.now(),
+            captureContext(),
+          ],
+        );
+        await q.query("INSERT INTO idempotency VALUES($1,$2,$3,$4,$5)", [
+          u.org_id,
+          u.id,
+          key,
+          fingerprint,
+          id,
+        ]);
+        await this.audit(
+          q,
+          u.org_id,
+          u.id,
+          "payment.created",
+          "Submitted for independent approval.",
+          id,
+        );
+        return this.payment(u, id, q);
+      }),
+    );
   }
-  review(
-    user: User,
+  async review(
+    u: User,
     id: string,
     action: "approve" | "reject",
     version: number,
     reason?: string,
   ) {
-    this.allow(user, ["checker", "admin"]);
-    return this.transaction(() => {
-      const p = this.payment(id);
-      if (p.created_by === user.id)
-        throw new AppError(
-          403,
-          "You cannot review a payment you created. Ask another checker.",
-        );
-      if (p.status !== "pending" || p.version !== version)
-        throw new AppError(
-          409,
-          "This payment has changed. Refresh before reviewing.",
-        );
-      if (
-        action === "reject" &&
-        (!reason || reason.trim().length < 5 || reason.length > 300)
-      )
-        throw new AppError(
-          400,
-          "Give a rejection reason between 5 and 300 characters.",
-        );
-      const state = action === "approve" ? "queued" : "rejected";
-      this.db
-        .prepare(
-          "UPDATE payments SET status=?,reviewed_by=?,reason=?,version=version+1,updated_at=? WHERE id=?",
+    return span("payment.review", { payment: id, org: u.org_id }, () =>
+      this.db.tx(async (q) => {
+        await this.authorize(q, u, ["checker", "admin"]);
+        const p = await this.payment(u, id, q, true);
+        if (p.created_by === u.id)
+          throw new AppError(
+            403,
+            "You cannot review a payment you created. Ask another checker.",
+          );
+        if (p.status !== "pending" || p.version !== version)
+          throw new AppError(
+            409,
+            "This payment has changed. Refresh before reviewing.",
+          );
+        if (
+          action === "reject" &&
+          (!reason || reason.trim().length < 5 || reason.length > 300)
         )
-        .run(
-          state,
-          user.id,
-          action === "reject" ? reason!.trim() : null,
-          this.now(),
+          throw new AppError(
+            400,
+            "Give a reason between 5 and 300 characters.",
+          );
+        await q.query(
+          "UPDATE payments SET status=$1,reviewed_by=$2,reason=$3,version=version+1,updated_at=$4,trace_context=$6 WHERE id=$5",
+          [
+            action === "approve" ? "queued" : "rejected",
+            u.id,
+            action === "reject" ? reason!.trim() : null,
+            this.now(),
+            id,
+            captureContext(),
+          ],
+        );
+        if (action === "approve")
+          await q.query(
+            "INSERT INTO jobs(payment_id,org_id,next_at) VALUES($1,$2,$3)",
+            [id, u.org_id, this.now()],
+          );
+        await this.audit(
+          q,
+          u.org_id,
+          u.id,
+          "payment." + (action === "approve" ? "approved" : "rejected"),
+          action === "approve" ? "Approved and queued." : reason!.trim(),
           id,
         );
-      if (action === "approve")
-        this.db
-          .prepare("INSERT INTO jobs(payment_id,next_at) VALUES(?,?)")
-          .run(id, this.now());
-      this.audit(
-        user.id,
-        action === "approve" ? "payment.approved" : "payment.rejected",
-        action === "approve"
-          ? "Approved and queued for processing."
-          : reason!.trim(),
-        id,
-      );
-      return this.payment(id);
-    });
+        return this.payment(u, id, q);
+      }),
+    );
   }
-  mode() {
-    return (
-      this.db
-        .prepare("SELECT value FROM settings WHERE key='provider_mode'")
-        .get() as { value: string }
-    ).value;
-  }
-  setMode(user: User, mode: string) {
-    this.allow(user, ["admin"]);
-    if (!["healthy", "offline", "timeout_once"].includes(mode))
-      throw new AppError(400, "Unknown simulator mode.");
-    this.transaction(() => {
-      this.db
-        .prepare("UPDATE settings SET value=? WHERE key='provider_mode'")
-        .run(mode);
-      this.audit(user.id, "provider.mode_changed", "Simulator mode: " + mode);
-    });
-  }
-  retry(user: User, id: string) {
-    this.allow(user, ["admin", "checker"]);
-    return this.transaction(() => {
-      const p = this.payment(id);
+  async retry(u: User, id: string) {
+    return this.db.tx(async (q) => {
+      await this.authorize(q, u, ["checker", "admin"]);
+      const p = await this.payment(u, id, q, true);
       if (p.status !== "failed")
-        throw new AppError(409, "Only exhausted payments can be retried.");
-      this.db
-        .prepare(
-          "UPDATE jobs SET done=0,attempts=0,next_at=?,last_error=NULL WHERE payment_id=?",
-        )
-        .run(this.now(), id);
-      this.db
-        .prepare(
-          "UPDATE payments SET status='queued',version=version+1,updated_at=? WHERE id=?",
-        )
-        .run(this.now(), id);
-      this.audit(
-        user.id,
+        throw new AppError(
+          409,
+          "Only exhausted, unambiguous failures can be retried.",
+        );
+      await q.query(
+        "UPDATE jobs SET done=false,attempts_cycle=0,next_at=$1,last_error=NULL,lease_owner=NULL,lease_until=NULL,claim_version=claim_version+1 WHERE payment_id=$2",
+        [this.now(), id],
+      );
+      await q.query(
+        "UPDATE payments SET status='queued',version=version+1,updated_at=$1 WHERE id=$2",
+        [this.now(), id],
+      );
+      await this.audit(
+        q,
+        u.org_id,
+        u.id,
         "payment.requeued",
-        "A new bounded retry cycle was requested.",
+        "New retry cycle requested; prior attempts retained.",
         id,
       );
-      return this.payment(id);
+      return this.payment(u, id, q);
     });
   }
-  tick() {
-    // Single synchronous worker. Provider receipt persists before local confirmation,
-    // reproducing the failure window of a provider accepting a payment then timing out.
-    const jobs = this.db
-      .prepare(
-        "SELECT * FROM jobs WHERE done=0 AND next_at<=? ORDER BY next_at LIMIT 20",
+  async setMode(u: User, mode: string) {
+    if (
+      ![
+        "healthy",
+        "offline",
+        "timeout_once",
+        "lookup_offline",
+        "decline",
+      ].includes(mode)
+    )
+      throw new AppError(400, "Unknown simulator mode.");
+    await this.db.tx(async (q) => {
+      await this.authorize(q, u, ["admin"]);
+      await q.query("UPDATE organizations SET provider_mode=$1 WHERE id=$2", [
+        mode,
+        u.org_id,
+      ]);
+      await this.audit(
+        q,
+        u.org_id,
+        u.id,
+        "provider.mode_changed",
+        "Simulator mode: " + mode,
+      );
+    });
+  }
+  async summary(u: User) {
+    await this.authorize(this.db.pool, u);
+    const rows = await this.db.query(
+      "SELECT status,count(*)::int count,COALESCE(sum(amount),0)::bigint amount FROM payments WHERE org_id=$1 GROUP BY status",
+      [u.org_id],
+    );
+    return {
+      total: rows.reduce((n, r) => n + r.count, 0),
+      amount: rows.reduce((n, r) => n + r.amount, 0),
+      byStatus: Object.fromEntries(
+        rows.map((r) => [r.status, { count: r.count, amount: r.amount }]),
+      ),
+    };
+  }
+  async list(u: User, query: unknown) {
+    await this.authorize(this.db.pool, u);
+    const options = z
+      .object({
+        status: z.enum(["all", ...states]).default("all"),
+        search: z.string().max(120).default(""),
+        sort: z.enum(["newest", "oldest", "amount"]).default("newest"),
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+        cursor: z.string().max(2048).optional(),
+      })
+      .parse(query);
+    const scope = hash(
+      JSON.stringify([u.org_id, options.status, options.search, options.sort]),
+    );
+    const args: any[] = [u.org_id];
+    let where = "p.org_id=$1";
+    if (options.status !== "all") {
+      args.push(options.status);
+      where += ` AND p.status=$${args.length}`;
+    }
+    if (options.search) {
+      args.push("%" + options.search.replace(/[\\%_]/g, "\\$&") + "%");
+      where += ` AND (b.name ILIKE $${args.length} OR p.reference ILIKE $${args.length} OR p.id ILIKE $${args.length})`;
+    }
+    const col = options.sort === "amount" ? "p.amount" : "p.created_at",
+      direction = options.sort === "oldest" ? "ASC" : "DESC";
+    if (options.cursor) {
+      const cursor = this.cursor(options.cursor, scope);
+      args.push(cursor.value, cursor.id);
+      where += ` AND (${col},p.id) ${direction === "ASC" ? ">" : "<"} ($${args.length - 1},$${args.length})`;
+    }
+    args.push(options.limit + 1);
+    const rows = await this.db.query(
+      detailSelect +
+        ` WHERE ${where} ORDER BY ${col} ${direction},p.id ${direction} LIMIT $${args.length}`,
+      args,
+    );
+    const more = rows.length > options.limit;
+    const items = rows.slice(0, options.limit);
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: more
+        ? this.encode({
+            scope,
+            value: last[options.sort === "amount" ? "amount" : "created_at"],
+            id: last.id,
+          })
+        : null,
+    };
+  }
+  encode(value: unknown) {
+    return Buffer.from(JSON.stringify(value)).toString("base64url");
+  }
+  cursor(encoded: string, scope: string) {
+    try {
+      const c = z
+        .object({
+          scope: z.literal(scope),
+          value: z.number().int().nonnegative().safe(),
+          id: z.string().max(100),
+        })
+        .parse(JSON.parse(Buffer.from(encoded, "base64url").toString()));
+      return c;
+    } catch {
+      throw new AppError(400, "Invalid cursor for this query.");
+    }
+  }
+  async history(u: User, query: unknown, paymentId?: string, attempts = false) {
+    await this.authorize(this.db.pool, u);
+    if (paymentId) await this.payment(u, paymentId);
+    const { limit, cursor } = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+        cursor: z.string().max(2048).optional(),
+      })
+      .parse(query);
+    const scope = hash(
+      [u.org_id, paymentId ?? "", attempts ? "attempts" : "audit"].join(":"),
+    );
+    const args: any[] = [u.org_id];
+    let where = "a.org_id=$1";
+    if (paymentId) {
+      args.push(paymentId);
+      where += " AND a.payment_id=$2";
+    }
+    if (cursor) {
+      args.push(this.cursor(cursor, scope).value);
+      where += ` AND a.id<$${args.length}`;
+    }
+    args.push(limit + 1);
+    const rows = await this.db.query(
+      attempts
+        ? `SELECT a.* FROM attempts a WHERE ${where} ORDER BY a.id DESC LIMIT $${args.length}`
+        : `SELECT a.*,COALESCE(u.name,'System') actor_name FROM audit a LEFT JOIN users u ON u.id=a.actor WHERE ${where} ORDER BY a.id DESC LIMIT $${args.length}`,
+      args,
+    );
+    const items = rows.slice(0, limit);
+    return {
+      items,
+      nextCursor:
+        rows.length > limit
+          ? this.encode({ scope, value: items.at(-1).id, id: "" })
+          : null,
+    };
+  }
+  async beneficiaries(u: User, query: unknown) {
+    await this.authorize(this.db.pool, u);
+    const { limit, cursor } = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(100).default(50),
+        cursor: z.string().max(2048).optional(),
+      })
+      .parse(query);
+    const scope = hash(u.org_id + ":beneficiaries");
+    const after = cursor ? this.cursor(cursor, scope).id : "";
+    const rows = await this.db.query(
+      "SELECT * FROM beneficiaries WHERE org_id=$1 AND id>$2 ORDER BY id LIMIT $3",
+      [u.org_id, after, limit + 1],
+    );
+    const items = rows.slice(0, limit);
+    return {
+      items,
+      nextCursor:
+        rows.length > limit
+          ? this.encode({ scope, value: 0, id: items.at(-1).id })
+          : null,
+    };
+  }
+  async members(u: User) {
+    await this.authorize(this.db.pool, u, ["admin"]);
+    return this.db.query(
+      "SELECT u.id,u.name,u.email,m.role,m.active FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.org_id=$1 ORDER BY u.id LIMIT 100",
+      [u.org_id],
+    );
+  }
+  async memberRole(u: User, id: string, role: Role, active: boolean) {
+    await this.db.tx(async (q) => {
+      await one(q, "SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [
+        u.org_id,
+      ]);
+      await this.authorize(q, u, ["admin"]);
+      if (
+        !(await one(
+          q,
+          "SELECT * FROM memberships WHERE org_id=$1 AND user_id=$2",
+          [u.org_id, id],
+        ))
       )
-      .all(this.now()) as { payment_id: string; attempts: number }[];
-    for (const job of jobs) {
-      let failure: string | null = null;
-      const receipt = this.db
-        .prepare("SELECT receipt FROM provider_receipts WHERE payment_id=?")
-        .get(job.payment_id);
-      if (!receipt) {
-        if (this.mode() === "offline")
-          failure = "Simulated provider unavailable.";
-        else {
-          this.db
-            .prepare("INSERT INTO provider_receipts VALUES(?,?,?)")
-            .run(job.payment_id, "mock_" + randomUUID(), this.now());
-          if (this.mode() === "timeout_once")
-            failure =
-              "Provider accepted the payment but its response timed out. Retry will reconcile the same payment key.";
-        }
-      }
-      this.transaction(() => {
-        const attempts = job.attempts + 1;
-        const status = failure
-          ? attempts >= 3
-            ? "failed"
-            : "retrying"
-          : "paid";
-        this.db
-          .prepare(
-            "UPDATE jobs SET attempts=?,next_at=?,done=?,last_error=? WHERE payment_id=?",
-          )
-          .run(
-            attempts,
-            this.now() + 5000 * 2 ** (attempts - 1),
-            status === "paid" || status === "failed" ? 1 : 0,
-            failure,
-            job.payment_id,
-          );
-        this.db
-          .prepare(
-            "UPDATE payments SET status=?,updated_at=?,version=version+1 WHERE id=?",
-          )
-          .run(status, this.now(), job.payment_id);
-        this.audit(
-          "system",
-          failure
-            ? status === "failed"
-              ? "payment.failed"
-              : "payment.retry_scheduled"
-            : "payment.paid",
-          failure ?? "Provider receipt confirmed. No real funds moved.",
-          job.payment_id,
+        throw new AppError(404, "Member not found.");
+      await q.query(
+        "UPDATE memberships SET role=$1,active=$2 WHERE org_id=$3 AND user_id=$4",
+        [role, active, u.org_id, id],
+      );
+      if (
+        !(await one(
+          q,
+          "SELECT user_id FROM memberships WHERE org_id=$1 AND role='admin' AND active=true",
+          [u.org_id],
+        ))
+      )
+        throw new AppError(409, "Keep at least one active administrator.");
+      await this.audit(
+        q,
+        u.org_id,
+        u.id,
+        "member.updated",
+        `Membership ${id}: ${role}, active=${active}`,
+      );
+    });
+  }
+  async invite(u: User, email: string, role: Role) {
+    const token = randomBytes(32).toString("hex");
+    await this.db.tx(async (q) => {
+      await this.authorize(q, u, ["admin"]);
+      await q.query("INSERT INTO invitations VALUES($1,$2,$3,$4,$5,NULL)", [
+        hash(token),
+        u.org_id,
+        email.toLowerCase(),
+        role,
+        this.now() + 24 * 3600000,
+      ]);
+      await q.query(
+        "INSERT INTO delivery_outbox(recipient,kind,payload,created_at) VALUES($1,$2,$3,$4)",
+        [
+          email.toLowerCase(),
+          "invitation",
+          encrypt(JSON.stringify({ token, org: u.org_name ?? u.org_id })),
+          this.now(),
+        ],
+      );
+      await this.audit(
+        q,
+        u.org_id,
+        u.id,
+        "member.invited",
+        "Invitation queued for delivery.",
+      );
+    });
+    return { ok: true };
+  }
+  async acceptInvitation(raw: unknown) {
+    const input = z
+      .object({
+        token: z.string().length(64),
+        name: z.string().trim().min(2).max(100),
+        password: strongPassword,
+      })
+      .parse(raw);
+    const candidate = await one(
+      this.db.pool,
+      "SELECT * FROM invitations WHERE token=$1 AND used_at IS NULL AND expires_at>$2",
+      [hash(input.token), this.now()],
+    );
+    if (!candidate)
+      throw new AppError(400, "Invitation is invalid or expired.");
+    const existing = await one(
+      this.db.pool,
+      "SELECT * FROM users WHERE email=$1",
+      [candidate.email],
+    );
+    if (existing && !(await passwordMatches(input.password, existing)))
+      throw new AppError(
+        401,
+        "Use the existing account password to accept this invitation.",
+      );
+    const creds = existing ?? (await passwordHash(input.password));
+    await this.db.tx(async (q) => {
+      await q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        candidate.email,
+      ]);
+      const invite = await one(
+        q,
+        "SELECT * FROM invitations WHERE token=$1 AND used_at IS NULL AND expires_at>$2 FOR UPDATE",
+        [hash(input.token), this.now()],
+      );
+      if (!invite) throw new AppError(400, "Invitation is invalid or expired.");
+      const latest = await one(
+        q,
+        "SELECT * FROM users WHERE email=$1 FOR UPDATE",
+        [candidate.email],
+      );
+      if (
+        (latest && !existing) ||
+        (existing && latest.credential_version !== existing.credential_version)
+      )
+        throw new AppError(409, "Account changed. Try accepting again.");
+      const id = existing?.id ?? "usr_" + randomUUID();
+      if (!existing)
+        await q.query(
+          "INSERT INTO users(id,name,email,password_hash,salt) VALUES($1,$2,$3,$4,$5)",
+          [id, input.name, candidate.email, creds.password_hash, creds.salt],
+        );
+      await q.query(
+        "INSERT INTO memberships VALUES($1,$2,$3,true) ON CONFLICT(org_id,user_id) DO NOTHING",
+        [invite.org_id, id, invite.role],
+      );
+      await q.query("UPDATE invitations SET used_at=$1 WHERE token=$2", [
+        this.now(),
+        hash(input.token),
+      ]);
+      await this.audit(
+        q,
+        invite.org_id,
+        id,
+        "invitation.accepted",
+        "Membership activated.",
+      );
+    });
+  }
+  async rotatePassword(u: User, current: string, next: string) {
+    strongPassword.parse(next);
+    const record = await one(this.db.pool, "SELECT * FROM users WHERE id=$1", [
+      u.id,
+    ]);
+    if (!(await passwordMatches(current, record)))
+      throw new AppError(401, "Current password is incorrect.");
+    const creds = await passwordHash(next);
+    await this.db.tx(async (q) => {
+      await this.authorize(q, u);
+      const row = await one(
+        q,
+        "UPDATE users SET password_hash=$1,salt=$2,credential_version=credential_version+1 WHERE id=$3 AND credential_version=$4 RETURNING id",
+        [creds.password_hash, creds.salt, u.id, record.credential_version],
+      );
+      if (!row) throw new AppError(409, "Credentials changed. Try again.");
+      await q.query("DELETE FROM sessions WHERE user_id=$1", [u.id]);
+      await q.query(
+        "UPDATE recoveries SET used_at=$1 WHERE user_id=$2 AND used_at IS NULL",
+        [this.now(), u.id],
+      );
+      await this.audit(
+        q,
+        u.org_id,
+        u.id,
+        "credentials.rotated",
+        "Password changed; all sessions revoked.",
+      );
+    });
+  }
+  async requestRecovery(email: string) {
+    const row = await one(this.db.pool, "SELECT id FROM users WHERE email=$1", [
+      email.toLowerCase(),
+    ]);
+    if (row) {
+      const token = randomBytes(32).toString("hex");
+      await this.db.tx(async (q) => {
+        await q.query("INSERT INTO recoveries VALUES($1,$2,$3,NULL)", [
+          hash(token),
+          row.id,
+          this.now() + 30 * 60000,
+        ]);
+        await q.query(
+          "INSERT INTO delivery_outbox(recipient,kind,payload,created_at) VALUES($1,$2,$3,$4)",
+          [
+            email.toLowerCase(),
+            "recovery",
+            encrypt(JSON.stringify({ token })),
+            this.now(),
+          ],
         );
       });
     }
-    return jobs.length;
-  }
-  snapshot(user: User) {
     return {
-      user,
-      users: this.db.prepare("SELECT id,name,email,role FROM users").all(),
-      beneficiaries: this.db
-        .prepare("SELECT * FROM beneficiaries ORDER BY name")
-        .all(),
-      payments: this.db
-        .prepare(
-          "SELECT p.*, b.name AS beneficiary_name,b.bank,b.account_suffix,u.name AS creator_name,r.name AS reviewer_name,j.attempts,j.next_at,j.last_error,pr.receipt FROM payments p JOIN beneficiaries b ON b.id=p.beneficiary_id JOIN users u ON u.id=p.created_by LEFT JOIN users r ON r.id=p.reviewed_by LEFT JOIN jobs j ON j.payment_id=p.id LEFT JOIN provider_receipts pr ON pr.payment_id=p.id ORDER BY p.created_at DESC,p.rowid DESC",
-        )
-        .all(),
-      audit: this.db
-        .prepare(
-          "SELECT a.*,COALESCE(u.name,'System') AS actor_name FROM audit a LEFT JOIN users u ON u.id=a.actor ORDER BY a.id DESC LIMIT 500",
-        )
-        .all(),
-      providerMode: this.mode(),
-      serverTime: this.now(),
+      ok: true,
+      message:
+        "If this account exists, recovery instructions have been queued.",
     };
+  }
+  async recover(token: string, password: string) {
+    strongPassword.parse(password);
+    const creds = await passwordHash(password);
+    await this.db.tx(async (q) => {
+      const candidate = await one(
+        q,
+        "SELECT user_id FROM recoveries WHERE token=$1",
+        [hash(token)],
+      );
+      if (!candidate)
+        throw new AppError(400, "Recovery token is invalid or expired.");
+      // Serialize credential changes before locking one-time tokens, including
+      // two distinct recovery tokens for the same account.
+      await one(q, "SELECT id FROM users WHERE id=$1 FOR UPDATE", [
+        candidate.user_id,
+      ]);
+      const record = await one(
+        q,
+        "SELECT * FROM recoveries WHERE token=$1 AND used_at IS NULL AND expires_at>$2 FOR UPDATE",
+        [hash(token), this.now()],
+      );
+      if (!record)
+        throw new AppError(400, "Recovery token is invalid or expired.");
+      await q.query(
+        "UPDATE users SET password_hash=$1,salt=$2,credential_version=credential_version+1 WHERE id=$3",
+        [creds.password_hash, creds.salt, record.user_id],
+      );
+      await q.query("DELETE FROM sessions WHERE user_id=$1", [record.user_id]);
+      await q.query(
+        "UPDATE recoveries SET used_at=$1 WHERE user_id=$2 AND used_at IS NULL",
+        [this.now(), record.user_id],
+      );
+      for (const m of (
+        await q.query("SELECT org_id FROM memberships WHERE user_id=$1", [
+          record.user_id,
+        ])
+      ).rows)
+        await this.audit(
+          q,
+          m.org_id,
+          record.user_id,
+          "credentials.recovered",
+          "Credentials recovered; all sessions revoked.",
+        );
+    });
+  }
+  async callback(event: {
+    id: string;
+    paymentId: string;
+    amount: number;
+    receipt: string;
+    outcome: "confirmed" | "declined";
+  }) {
+    await this.db.tx(async (q) => {
+      const p = await one<Payment>(
+        q,
+        "SELECT * FROM payments WHERE id=$1 FOR UPDATE",
+        [event.paymentId],
+      );
+      if (!p || p.amount !== event.amount)
+        throw new AppError(400, "Callback payment mismatch.");
+      const inserted = await one(
+        q,
+        "INSERT INTO callback_events VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id",
+        [event.id, this.now()],
+      );
+      if (!inserted) return;
+      if (!["queued", "retrying", "reconciling", "failed"].includes(p.status))
+        return;
+      const status = event.outcome === "confirmed" ? "paid" : "declined";
+      await q.query(
+        "UPDATE payments SET status=$1,receipt=$2,version=version+1,updated_at=$3 WHERE id=$4",
+        [
+          status,
+          event.outcome === "confirmed" ? event.receipt : null,
+          this.now(),
+          p.id,
+        ],
+      );
+      await q.query(
+        "UPDATE jobs SET done=true,lease_owner=NULL,lease_until=NULL,claim_version=claim_version+1 WHERE payment_id=$1",
+        [p.id],
+      );
+      await this.audit(
+        q,
+        p.org_id,
+        "provider",
+        "payment." + status,
+        "Signed provider callback confirmed the outcome.",
+        p.id,
+      );
+    });
+  }
+  async health() {
+    await this.db.query("SELECT 1");
+    const row = (
+      await this.db.query(
+        `SELECT count(*) FILTER(WHERE done=false)::int queued,count(*) FILTER(WHERE uncertain AND done=false)::int reconciling,COALESCE(max($1-next_at) FILTER(WHERE done=false AND next_at<$1),0)::bigint queue_age_ms FROM jobs`,
+        [this.now()],
+      )
+    )[0];
+    const heartbeat = (
+      await this.db.query(
+        "SELECT max(seen_at) last_worker FROM worker_heartbeats",
+      )
+    )[0];
+    return { ...row, ...heartbeat };
   }
 }

@@ -160,8 +160,12 @@ export function CreatePayment({
   onClose: () => void;
   onCreated: () => Promise<void>;
 }) {
+  const [beneficiaries, setBeneficiaries] = useState(data.beneficiaries);
+  const [nextBeneficiaries, setNextBeneficiaries] = useState(
+    data.beneficiaryCursor,
+  );
   const [beneficiaryId, setBeneficiary] = useState(
-    initialBeneficiary ?? data.beneficiaries[0].id,
+    initialBeneficiary ?? data.beneficiaries[0]?.id ?? "",
   );
   const [amount, setAmount] = useState("");
   const [reference, setReference] = useState("");
@@ -171,7 +175,7 @@ export function CreatePayment({
   const [discard, setDiscard] = useState(false);
   const key = useRef(crypto.randomUUID());
   const heading = useRef<HTMLHeadingElement>(null);
-  const beneficiary = data.beneficiaries.find((b) => b.id === beneficiaryId)!;
+  const beneficiary = beneficiaries.find((b) => b.id === beneficiaryId)!;
   const [whole, part = ""] = amount.split(".");
   const minor = Number(whole) * 100 + Number(part.padEnd(2, "0"));
   useEffect(() => {
@@ -188,6 +192,10 @@ export function CreatePayment({
   }
   function review(e: FormEvent) {
     e.preventDefault();
+    if (!beneficiary) {
+      setError("Choose a beneficiary first.");
+      return;
+    }
     if (!/^(0|[1-9]\d{0,7})(\.\d{1,2})?$/.test(amount) || minor <= 0) {
       setError(
         "Enter an amount from ₦0.01 to ₦99,999,999.99, with at most two decimal places.",
@@ -260,22 +268,50 @@ export function CreatePayment({
                 setBeneficiary(e.target.value);
               }}
             >
-              {data.beneficiaries.map((b) => (
+              {beneficiaries.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.name} · •••• {b.account_suffix}
                 </option>
               ))}
             </select>
           </label>
+          {nextBeneficiaries && (
+            <button
+              type="button"
+              className="text-button"
+              onClick={async () => {
+                try {
+                  const page = await api<{
+                    items: Workspace["beneficiaries"];
+                    nextCursor: string | null;
+                  }>(
+                    "/beneficiaries?cursor=" +
+                      encodeURIComponent(nextBeneficiaries),
+                  );
+                  setBeneficiaries((previous) => [
+                    ...previous,
+                    ...page.items.filter(
+                      (b) => !previous.some((old) => old.id === b.id),
+                    ),
+                  ]);
+                  setNextBeneficiaries(page.nextCursor);
+                } catch (e) {
+                  setError((e as Error).message);
+                }
+              }}
+            >
+              Load more beneficiaries
+            </button>
+          )}
           <div className="recipient-summary">
             <span className="recipient-icon">
               <Wallet size={18} />
             </span>
             <span>
-              <strong>{beneficiary.bank}</strong>
+              <strong>{beneficiary?.bank}</strong>
               <small>
-                Account ending {beneficiary.account_suffix} ·{" "}
-                {beneficiary.category}
+                Account ending {beneficiary?.account_suffix} ·{" "}
+                {beneficiary?.category}
               </small>
             </span>
           </div>
@@ -350,7 +386,7 @@ export function CreatePayment({
           <dl className="detail-grid">
             <dt>Bank account</dt>
             <dd>
-              {beneficiary.bank} · •••• {beneficiary.account_suffix}
+              {beneficiary?.bank} · •••• {beneficiary?.account_suffix}
             </dd>
             <dt>Reference</dt>
             <dd>{reference.trim()}</dd>

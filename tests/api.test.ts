@@ -1,16 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createApp } from "../server/app.js";
-import { Store } from "../server/domain.js";
+import { fixture } from "./helpers.js";
 import type { AddressInfo } from "node:net";
 test("HTTP boundary enforces login, mutation headers, role permissions, and cookie revocation", async (t) => {
-  const store = new Store(":memory:");
-  store.seed("test-password", false);
+  const { store } = await fixture(t);
   const server = createApp(store).listen(0, "127.0.0.1");
   await new Promise<void>((r) => server.once("listening", r));
   t.after(() => {
     server.close();
-    store.db.close();
   });
   const base = "http://127.0.0.1:" + (server.address() as AddressInfo).port;
   const post = (path: string, body: unknown, cookie = "", header = true) =>
@@ -20,10 +18,11 @@ test("HTTP boundary enforces login, mutation headers, role permissions, and cook
         "Content-Type": "application/json",
         Cookie: cookie,
         ...(header ? { "X-Requested-With": "LedgerDesk" } : {}),
+        "Idempotency-Key": "api-test-request",
       },
       body: JSON.stringify(body),
     });
-  assert.equal((await fetch(base + "/api/workspace")).status, 401);
+  assert.equal((await fetch(base + "/api/bootstrap")).status, 401);
   assert.equal(
     (
       await post(
@@ -45,7 +44,7 @@ test("HTTP boundary enforces login, mutation headers, role permissions, and cook
   assert.match(cookie, /SameSite=Strict/);
   const session = cookie.split(";")[0];
   assert.equal(
-    (await fetch(base + "/api/workspace", { headers: { Cookie: session } }))
+    (await fetch(base + "/api/bootstrap", { headers: { Cookie: session } }))
       .status,
     200,
   );
@@ -65,7 +64,7 @@ test("HTTP boundary enforces login, mutation headers, role permissions, and cook
   );
   await post("/logout", {}, session);
   assert.equal(
-    (await fetch(base + "/api/workspace", { headers: { Cookie: session } }))
+    (await fetch(base + "/api/bootstrap", { headers: { Cookie: session } }))
       .status,
     401,
   );

@@ -16,6 +16,8 @@ export const statusNames: Record<string, string> = {
   queued: "Queued",
   retrying: "Retry scheduled",
   paid: "Paid",
+  reconciling: "Confirming outcome",
+  declined: "Declined",
   failed: "Needs attention",
   rejected: "Rejected",
 };

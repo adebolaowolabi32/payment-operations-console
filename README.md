@@ -1,138 +1,114 @@
-# LedgerDesk · Payment Operations Console
+# LedgerDesk
 
-An original full stack portfolio project by **Cynthia Owolabi**: a payment operations workspace with independent approvals, an auditable lifecycle, and recovery from ambiguous provider failures.
+A payment operations console by Cynthia Owolabi. Create a request, have an independent reviewer approve it, and follow processing through confirmation or recovery. All companies and payments are synthetic; the provider simulator moves no real funds.
 
-Built to demonstrate engineering patterns relevant to fintech operations. All users, companies, accounts, and transactions are synthetic. The provider is simulated; no real funds move. This is not employer code or a reconstruction of an employer system.
-
-![LedgerDesk payment dashboard](docs/dashboard.png)
-
-## Why this project
-
-An approval button is easy. The interesting part is what happens when a creator approves their own request, two reviewers act on stale data, a client retries after a lost response, or a provider accepts a payment and then times out.
-
-LedgerDesk makes these cases visible and testable:
-
-- Server-enforced maker, checker, admin, and viewer permissions.
-- Independent approval, including for requests created by admins.
-- Integer minor units for NGN amounts; no floating-point payment arithmetic.
-- Idempotent creation with payload-conflict detection.
-- Atomic approval, audit event, and persistent outbox insertion.
-- Bounded retries and a provider simulator that can accept a payment before timing out.
-- Reconciliation using a stable payment key and a unique simulated provider receipt.
-- Audit records protected against updates and deletions by SQLite triggers.
-- Responsive dashboard, readable mobile payment cards, beneficiary directory, and system-health controls.
-- Two-step creation with a review summary, preserved recipient context, and draft-discard confirmation.
-- Status/search filters, sorting, payment progress, and persistent action-error feedback.
+![LedgerDesk payment overview](docs/dashboard.png)
 
 ## Run locally
 
-Requires **Node.js 22.13+ on the 22.x line, or Node.js 24+**, and npm. Node 22 prints an experimental warning for its built-in SQLite API.
+Use Node.js 22.13+ (22.x) or 24+, npm, and PostgreSQL 16+. Docker Compose can start the database:
 
-```sh
+```bash
 npm ci
+docker compose up -d postgres
 npm run dev
 ```
 
-Open **http://127.0.0.1:5173**. The API listens on port 3001 and Vite proxies `/api` to it. On first startup the app creates a SQLite database in `data/ledgerdesk.db` and seeds four users, four beneficiaries, and example payments.
+Open the Vite address printed in the terminal (normally http://127.0.0.1:5173). The API listens on 3001 and the separate provider simulator on 3003. `npm run dev` starts both services and Vite. Database migrations run at API/worker startup. The default database URL is `postgresql://ledgerdesk:ledgerdesk@127.0.0.1:5432/ledgerdesk`; set `DATABASE_URL` to use another local PostgreSQL instance.
 
-For the compiled frontend served by the API:
+For a compiled local demo:
 
-```sh
+```bash
 npm run build
+npm run provider
+# In another terminal:
 npm start
 ```
 
-Open **http://127.0.0.1:3001**. No external database or payment credentials are needed.
+Open http://127.0.0.1:3001. For a second worker, run `npm run worker`. Use `PROCESS_ROLE=api npm start` to separate the API from background processing entirely.
 
-### Demo accounts
+The previous SQLite application database is not modified or imported. PostgreSQL starts a new seeded demo. The **provider simulator alone** uses its own SQLite receipt database (`data/provider.db`), independently of the application database.
 
-Default local password for all accounts: `LedgerDemo!2026`.
+## Explore
 
-| Account                  | Role    | Permissions                                                         |
-| ------------------------ | ------- | ------------------------------------------------------------------- |
-| `maya@ledgerdesk.demo`   | Maker   | Create and view payments                                            |
-| `daniel@ledgerdesk.demo` | Checker | Review others' requests and retry exhausted payments                |
-| `amara@ledgerdesk.demo`  | Admin   | Create, review others' requests, retry, and configure the simulator |
-| `alex@ledgerdesk.demo`   | Viewer  | Read workspace data                                                 |
+All seeded accounts use the local demo password `LedgerDemo!2026`:
 
-The role shortcuts on the login page select an email; they do not bypass authentication. Sign out to switch roles.
+| Account                | Role    | Can do                                              |
+| ---------------------- | ------- | --------------------------------------------------- |
+| maya@ledgerdesk.demo   | Maker   | Submit payments                                     |
+| daniel@ledgerdesk.demo | Checker | Review and retry                                    |
+| amara@ledgerdesk.demo  | Admin   | Manage members, simulator, payments, and workspaces |
+| alex@ledgerdesk.demo   | Viewer  | Read workspace records                              |
 
-## Five-minute walkthrough
+1. Sign in as Maya and create a payment. Review its details before submitting.
+2. Sign out and use Daniel to approve it. The provider confirms a simulated receipt.
+3. Use Amara’s **System health** page to try an outage, permanent decline, or a response lost after acceptance.
+4. Watch **Confirming outcome** payments reconcile. An unresolved payment cannot be manually resubmitted.
+5. Switch Amara from Cedar Finance to Harbor Labs to see isolated payment records. Use **Account** to invite members, change roles, deactivate membership, or rotate a password.
 
-1. Sign in as **Maya**, select **New payment**, choose a beneficiary, and enter an amount and reference. Select **Review payment**, check the summary, then submit.
-2. Open the payment. There is no self-approval control, and the API independently rejects unauthorized review.
-3. Sign out and sign in as **Daniel**. Open the request under **Approvals**, then approve it. The worker confirms it within a few seconds.
-4. Open **Audit trail** to see creation, approval, and provider confirmation with their actors.
-5. Sign in as **Amara** and set **System health → Simulator behavior** to **Accept, then time out**. Approve a pending request created by Maya. The first attempt records provider acceptance but reports a timeout. After five seconds, a retry reconciles the existing receipt and marks it paid.
-6. Set the provider to **Unavailable** and approve another request. It attempts three times, waiting five and then ten seconds. Restore **Healthy** and use **Retry payment** on the exhausted request to recover.
+The UI retains the existing visual design, mobile payment cards, draft protection, and review step. Payment filters and sorting now run on the server. Previous/next controls access bounded payment, beneficiary, audit, and per-payment history pages. Dashboard totals cover the whole workspace, regardless of the current page.
 
-## Architecture
+## Backend guarantees and tradeoffs
 
-```mermaid
-flowchart LR
-    UI[React workspace] --> API[Express API\nSessions · validation · role permissions]
-    API --> DB[(SQLite\nPayments · audit · sessions)]
-    API --> TX[Approval transaction]
-    TX --> DB
-    TX --> Queue[(Persistent outbox)]
-    Queue --> Worker[Single worker\nBounded retry schedule]
-    Worker --> Provider[Mock provider\nUnique receipt per payment key]
-    Worker --> DB
-```
+- **Independent approval:** administrators cannot approve their own requests. Version checks reject conflicting reviews.
+- **Atomic writes:** approval, its audit event, and its processing job commit together. An insertion failure rolls back the transaction.
+- **Idempotency:** equivalent request bodies under the same actor/workspace/key return the original payment; conflicting bodies fail. Every provider submission uses a stable workspace/payment key.
+- **Concurrent workers:** atomic `SKIP LOCKED` claims, expiry, ownership, and claim versions prevent stale workers from changing payment state. An expired claim first reconciles with the provider. Remote idempotency remains necessary when workers overlap.
+- **Explicit outcomes:** confirmed, permanent decline, pre-acceptance unavailability, and unknown outcomes have separate paths. Unavailable submissions get three attempts; uncertain outcomes keep reconciling with capped backoff and jitter. They never become safely retryable just because time passed.
+- **Durable history:** started operations and their outcomes are separate append-only attempt events. Missing outcomes expose interrupted work; manual retry cycles preserve earlier events. Signed callbacks are deduplicated and cannot regress a terminal state.
+- **Workspace boundaries:** each resource read and mutation checks current membership and organization. Sessions reflect role revocation immediately; credential changes invalidate all sessions.
+- **Account lifecycle:** asynchronous scrypt, hashed session/recovery/invitation tokens, shared PostgreSQL throttling, one-time recovery, and encrypted delivery outbox records.
+- **Operations:** correlated structured logs, persisted OpenTelemetry trace context, attempt/latency metrics, queue diagnostics, liveness/readiness, and retryable external audit export.
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending: Maker submits
-    pending --> rejected: Independent checker rejects
-    pending --> queued: Independent checker approves
-    queued --> paid: Receipt confirmed
-    queued --> retrying: Attempt fails
-    retrying --> paid: Receipt confirmed or reconciled
-    retrying --> retrying: Next attempt fails
-    retrying --> failed: Three attempts exhausted
-    failed --> queued: Authorized manual retry
-```
+This remains an engineering demo. The application’s database owner can bypass SQL history triggers. Stronger retention requires an independently administered destination. The provider must honor stable idempotency keys and authoritative lookup semantics. Authentication delivery requires configuring a receiver; queueing an invitation by itself does not send an email.
 
-Read [the design decisions and failure analysis](docs/ARCHITECTURE.md), [the API contract](docs/API.md), and [the prioritized backend roadmap](docs/BACKEND-ROADMAP.md).
+## Delivery and audit retention
 
-## Validation
+Set `DELIVERY_URL` and `DELIVERY_TOKEN` to an authenticated HTTP email-delivery adapter. The worker sends `{id, recipient, kind, token, org?}` with a stable `Idempotency-Key`. The adapter must durably accept and deduplicate the request before returning 2xx, then deliver the token privately to the recipient. Failed requests retry; tokens are encrypted at rest with `DELIVERY_KEY`. Recovery responses do not reveal whether an email is registered. Invitation acceptance and recovery forms are available on the sign-in screen.
 
-```sh
-npm test
-npm run build
-npx playwright install chromium
-npm run test:e2e
-```
-
-The domain/API suite covers integer money validation, idempotency conflicts, role enforcement, self-approval, stale review, transaction rollback, rejection, timeout reconciliation, retry exhaustion, immutable audit operations, session revocation/expiry, and recovery after restart.
-
-The browser tests cover recipient preselection, review/edit, draft protection, filters, mobile navigation, and persistent errors. The end-to-end workflow signs in as a maker, creates a payment, verifies self-approval is unavailable, switches to a checker, approves, and waits for confirmation. It also checks mobile viewport overflow and navigation. Screenshots are generated in `docs/`.
+Set `AUDIT_EXPORT_URL` and `AUDIT_EXPORT_TOKEN` to an independently controlled archive receiver. It receives ordered batches `{after, through, events}` and a stable `Idempotency-Key`. The export checkpoint advances only after 2xx. The receiver must persist and deduplicate batches before acknowledging them. Keep the archive credentials and retention administration separate from the application database owner. Delivery and export are disabled when their URLs are unset.
 
 ## Configuration
 
-| Variable             | Default                   | Purpose                                                      |
-| -------------------- | ------------------------- | ------------------------------------------------------------ |
-| `PORT`               | `3001`                    | API and compiled site port                                   |
-| `HOST`               | `127.0.0.1`               | Bind address                                                 |
-| `DB_PATH`            | `data/ledgerdesk.db`      | Persistent database, or `:memory:` for disposable runs       |
-| `DEMO_PASSWORD`      | Local demo password above | Password used **only when seeding a new database**           |
-| `SEED_EXAMPLES`      | `true`                    | Set `false` to seed users and beneficiaries without payments |
-| `SIMULATOR_CONTROLS` | `true`                    | Set `false` to disable changes to simulator behavior         |
-| `COOKIE_SECURE`      | `false`                   | Set `true` behind HTTPS so session cookies are HTTPS-only    |
-| `NODE_ENV`           | Unset                     | `production` requires an explicit `DEMO_PASSWORD`            |
+| Variable                                           | Purpose                                                           |
+| -------------------------------------------------- | ----------------------------------------------------------------- |
+| `DATABASE_URL`, `DB_SCHEMA`                        | PostgreSQL connection and application schema (default `public`)   |
+| `PROCESS_ROLE`                                     | `api`, `worker`, or combined when unset                           |
+| `PORT`, `HOST`                                     | API listener; default 3001 / 127.0.0.1                            |
+| `PROVIDER_URL`, `PROVIDER_TOKEN`                   | Simulator endpoint and shared authentication                      |
+| `PROVIDER_PORT`, `PROVIDER_DB_PATH`                | Simulator listener and durable receipts                           |
+| `PROVIDER_TIMEOUT_MS`                              | HTTP timeout, default 800ms                                       |
+| `LEASE_MS`, `RETRY_BASE_MS`                        | Claim lease and initial retry delay, defaults 10000/5000ms        |
+| `WEBHOOK_SECRET`                                   | HMAC callback verification secret                                 |
+| `DELIVERY_KEY`, `DELIVERY_URL`, `DELIVERY_TOKEN`   | Encryption key and email adapter                                  |
+| `AUDIT_EXPORT_URL`, `AUDIT_EXPORT_TOKEN`           | External audit archive                                            |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | Enable OTLP traces/metrics and name the service                   |
+| `TRUST_PROXY`                                      | Explicit comma-separated trusted proxy addresses/subnets          |
+| `COOKIE_SECURE`                                    | Set `true` behind local HTTPS; automatically true in production   |
+| `SEED_DEMO`, `DEMO_PASSWORD`, `SEED_EXAMPLES`      | Hosted demo opt-in, explicit password, and sample payment control |
+| `SIMULATOR_CONTROLS`                               | Set `false` to disable changing provider modes through the API    |
+| `TEST_DATABASE_URL`                                | Isolated test database connection                                 |
 
-For a hosted demo, use HTTPS, `COOKIE_SECURE=true`, a persistent volume for `DB_PATH`, and one application process. This repository does not include a hosted deployment. SQLite is deliberately chosen for a reproducible single-process demo; production payment processing needs a separate operational design.
+Hosted use requires `DATABASE_URL`, `PROVIDER_TOKEN`, `WEBHOOK_SECRET`, and `DELIVERY_KEY`. Production does not seed accounts unless `SEED_DEMO=true`, which also requires an explicit `DEMO_PASSWORD`. Serve behind HTTPS and set only the proxies you actually trust. The displayed shared password is for the local synthetic demo.
 
-## Scope and limits
+## Validation
 
-- One workspace, one Node process, one synchronous worker. No multi-tenant isolation or distributed worker leases.
-- The mock provider's receipt table is in the same database for reproducibility. Its idempotency behavior is simulated, not proof of guarantees from a real bank.
-- No actual account balances, ledger postings, settlement, FX, refunds, or payment-provider integration.
-- Audit triggers prevent normal SQL updates/deletes, not tampering by a database administrator. There is no external immutable log store.
-- Beneficiaries are seeded and read-only. The activity screen shows the latest 500 events.
-- Public demo credentials, basic in-memory login throttling, and local session management are for demonstration. There is no SSO, MFA, credential recovery, or invitation workflow.
-- Historical employment metrics are not benchmarks for this application. No performance claims are made without measurement.
+```bash
+npm run format:check
+npm test
+npm run build
+npx playwright install --with-deps chromium
+npm run test:e2e
+npm run benchmark
+```
 
-## Author
+Tests require PostgreSQL. The test role must create/drop schemas; the backup test additionally creates a uniquely named scratch database and needs `CREATEDB`, `pg_dump`, and `pg_restore`. The PostgreSQL client major version must be at least the server’s. Tests never reset the application schema: they create and remove randomized fixtures. Browser checks use separate API/provider ports (3002/3004) and a temporary schema and receipt database.
 
-[Cynthia Owolabi](https://github.com/adebolaowolabi32) · [Portfolio](https://adebolaowolabi32.github.io/) · [LinkedIn](https://www.linkedin.com/in/adebolaowolabi)
+Coverage includes concurrent claims, expired leases, stale completion, real HTTP response loss plus simulator restart, permanent declines, unavailable lookups, duplicate callbacks, rollback, cross-workspace access, credential revocation, invitations/recovery, pagination beyond 500 events, delivery/export retry, trace continuity, and backup restoration. Browser checks cover desktop/mobile create-and-approve flows, filtering, drafts, workspace switching, and membership changes.
+
+[Query benchmark](docs/QUERY-BENCHMARK.json) records a reproducible 10,000-payment fixture, bounded response bytes, and an actual PostgreSQL query plan. It is a local sample, not a production capacity estimate.
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [API reference](docs/API.md)
+- [Backend implementation status](docs/BACKEND-ROADMAP.md)
+- [Operations and backup runbook](docs/OPERATIONS.md)

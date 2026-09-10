@@ -91,7 +91,7 @@ test("background refresh does not erase an action error", async ({ page }) => {
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "This payment has changed",
   );
-  await page.waitForResponse((r) => r.url().endsWith("/api/workspace"));
+  await page.waitForResponse((r) => r.url().endsWith("/api/summary"));
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
     "This payment has changed",
   );

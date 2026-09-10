@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ledgerdesk
+      POSTGRES_PASSWORD: ledgerdesk
+      POSTGRES_DB: ledgerdesk
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ledgerdesk-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledgerdesk"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+volumes:
+  ledgerdesk-postgres:

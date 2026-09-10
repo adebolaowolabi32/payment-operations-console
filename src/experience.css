@@ -1153,3 +1153,54 @@ dialog {
     min-height: 78px;
   }
 }
+
+.workspace select {
+  width: 100%;
+  max-width: 165px;
+  font-size: 13px;
+  padding: 6px;
+}
+.badge.reconciling {
+  background: #fff2d8;
+  color: #875700;
+}
+.badge.declined {
+  background: #fde7e7;
+  color: #a12b36;
+}
+.account-recovery {
+  margin-top: 18px;
+}
+.account-recovery .modal-actions {
+  flex-wrap: wrap;
+}
+.health-card form {
+  display: grid;
+  gap: 14px;
+}
+.member-form {
+  padding: 20px 0;
+  border-bottom: 1px solid #e5e9e8;
+}
+.member-form input[type="checkbox"] {
+  width: auto;
+}
+.audit-list .mono {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.sidebar {
+  overflow-y: auto;
+}
+.sidebar > * {
+  flex-shrink: 0;
+}
+.sidebar-bottom {
+  padding-top: 24px;
+}
+.workspace > div {
+  min-width: 0;
+}
+.workspace-avatar {
+  flex-shrink: 0;
+}
