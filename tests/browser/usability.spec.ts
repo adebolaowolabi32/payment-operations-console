@@ -75,6 +75,9 @@ test("background refresh does not erase an action error", async ({ page }) => {
   await page.getByRole("button", { name: /Daniel Checker/ }).click();
   await page.getByRole("button", { name: "Enter workspace" }).click();
   await page.getByLabel("Payment status").selectOption("pending");
+  await expect(page.locator("tbody tr .badge").first()).toHaveText(
+    "Awaiting approval",
+  );
   await page.locator("tbody tr").first().locator(".row-link").click();
   await page.route("**/api/payments/*/review", (route) =>
     route.fulfill({
