@@ -2,7 +2,27 @@
 
 A payment operations console by Cynthia Owolabi. Create a request, have an independent reviewer approve it, and follow processing through confirmation or recovery. All companies and payments are synthetic; the provider simulator moves no real funds.
 
-![LedgerDesk payment overview](docs/dashboard.png)
+**[Try the interactive demo](https://adebolaowolabi32.github.io/payment-operations-console/)** — no sign-up or installation.
+
+![LedgerDesk portfolio preview](docs/portfolio-desktop.png)
+
+## Interactive portfolio preview
+
+The GitHub Pages preview runs entirely in your browser with fictional payments. Choose Maya to create a request, sign out and choose Daniel to approve it, or explore as Amara to change the simulated provider behavior. Search, filter, page through payments, inspect receipts and history, and reset the demo whenever you like.
+
+Changes persist in this browser when local storage is available; restricted browsers use a temporary session. Processing advances while the workspace is open. Provider outcomes and queue metrics are simulated. There are no API calls, real transfers, hosted backend, database, account recovery, invitations, or password management in this preview. Demo roles illustrate the workflow; browser state is not a security boundary. The full application below implements server-side permissions, PostgreSQL persistence, concurrent workers, and operational telemetry.
+
+To run the same static preview locally:
+
+```bash
+npm ci
+npm run build:portfolio
+npm run preview:portfolio
+# Open http://127.0.0.1:4174/payment-operations-console/
+npm run test:portfolio
+```
+
+The Pages workflow builds and browser-tests the preview before deploying only `dist/`. Backend sources and local data are not part of the deployed site.
 
 **New here? Follow the [installation guide](docs/INSTALLATION.md)** for cloning, database setup, VM access, troubleshooting, and verification.
 

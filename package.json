@@ -16,7 +16,10 @@
     "format:check": "prettier --check .",
     "provider": "tsx server/simulator.ts",
     "worker": "PROCESS_ROLE=worker tsx server/index.ts",
-    "benchmark": "tsx tests/benchmark.ts"
+    "benchmark": "tsx tests/benchmark.ts",
+    "build:portfolio": "tsc --noEmit && vite build --mode portfolio",
+    "preview:portfolio": "vite preview --mode portfolio --host 127.0.0.1 --port 4174",
+    "test:portfolio": "playwright test -c playwright.portfolio.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

@@ -1,3 +1,4 @@
+import { portfolio, demoApi } from "./portfolio";
 export const money = (n: number) =>
   new Intl.NumberFormat("en-NG", {
     style: "currency",
@@ -34,6 +35,7 @@ export async function api<T>(
   body?: unknown,
   key?: string,
 ): Promise<T> {
+  if (portfolio) return demoApi<T>(url, body, key);
   const res = await fetch("/api" + url, {
     method: body === undefined ? "GET" : "POST",
     headers: {

@@ -1,3 +1,4 @@
+import { portfolio, resetDemo, storageAvailable } from "./portfolio";
 import { api, ApiError, money, date, statusNames } from "./lib";
 import {
   Badge,
@@ -135,26 +136,30 @@ function Login({ onLogin }: { onLogin: () => void }) {
           ))}
         </div>
         <form onSubmit={submit}>
-          <label>
-            Email address
-            <input
-              type="email"
-              autoComplete="username"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </label>
+          {!portfolio && (
+            <>
+              <label>
+                Email address
+                <input
+                  type="email"
+                  autoComplete="username"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </label>
+            </>
+          )}
           {error && (
             <p className="error" role="alert">
               {error}
@@ -165,9 +170,15 @@ function Login({ onLogin }: { onLogin: () => void }) {
             <ArrowRight size={17} />
           </button>
         </form>
-        <Recovery />
+        {!portfolio && <Recovery />}
         <p className="login-note">
-          Local demo password: <code>LedgerDemo!2026</code>
+          {portfolio ? (
+            "No sign-up needed. Switch roles by signing out."
+          ) : (
+            <>
+              Local demo password: <code>LedgerDemo!2026</code>
+            </>
+          )}
           <br />
           All companies and transactions are fictional. No real money moves.
         </p>
@@ -344,7 +355,7 @@ function App() {
     { name: "Beneficiaries", icon: Users },
     { name: "Audit trail", icon: FileClock },
     { name: "System health", icon: Activity },
-    { name: "Account", icon: Users },
+    ...(!portfolio ? [{ name: "Account", icon: Users }] : []),
   ];
   function navigate(name: string) {
     setPaymentPages([""]);
@@ -986,11 +997,17 @@ function App() {
               {user.role === "admin" && <Operations />}
               <section className="panel health-card">
                 <ShieldCheck className="green-text" />
-                <h2>What this demo enforces</h2>
+                <h2>
+                  {portfolio
+                    ? "Explore the payment lifecycle"
+                    : "What this demo enforces"}
+                </h2>
                 <ul className="checks">
                   <li>
                     <Check />
-                    Server-side role permissions
+                    {portfolio
+                      ? "Switchable demo roles"
+                      : "Server-side role permissions"}
                   </li>
                   <li>
                     <Check />
@@ -1002,7 +1019,9 @@ function App() {
                   </li>
                   <li>
                     <Check />
-                    Persistent queue and bounded retries
+                    {portfolio
+                      ? "Browser-simulated queue and retries"
+                      : "Persistent queue and bounded retries"}
                   </li>
                   <li>
                     <Check />
@@ -1010,13 +1029,15 @@ function App() {
                   </li>
                   <li>
                     <Check />
-                    Append-only audit records
+                    {portfolio
+                      ? "Browser-local activity history"
+                      : "Append-only audit records"}
                   </li>
                 </ul>
                 <p className="muted">
-                  Workspaces have separate membership and payment records.
-                  Multiple workers can process the queue safely. All transfers
-                  use a simulator.
+                  {portfolio
+                    ? "This preview simulates the workflow in your browser. Server permissions, concurrent workers and durable audit storage are implemented and tested in the full repository."
+                    : "Workspaces have separate membership and payment records. Multiple workers can process the queue safely. All transfers use a simulator."}
                 </p>
               </section>
             </div>
@@ -1394,6 +1415,34 @@ function PaymentDetail({
 }
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
+    {portfolio && (
+      <div className="portfolio-banner">
+        <div>
+          <strong>Interactive portfolio demo</strong>
+          <span>
+            Fictional payments · simulated processing ·{" "}
+            {storageAvailable
+              ? "saved in this browser"
+              : "temporary session; browser storage unavailable"}
+          </span>
+        </div>
+        <a href="https://github.com/adebolaowolabi32/payment-operations-console">
+          View source
+        </a>
+        <button
+          onClick={() => {
+            if (
+              window.confirm(
+                "Reset all demo payments and return to role selection?",
+              )
+            )
+              resetDemo();
+          }}
+        >
+          Reset demo
+        </button>
+      </div>
+    )}
     <App />
   </React.StrictMode>,
 );

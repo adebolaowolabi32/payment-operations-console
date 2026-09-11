@@ -1204,3 +1204,57 @@ dialog {
 .workspace-avatar {
   flex-shrink: 0;
 }
+
+.portfolio-banner {
+  position: relative;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 24px;
+  background: #163e35;
+  color: white;
+  font-size: 13px;
+}
+.portfolio-banner div {
+  flex: 1;
+}
+.portfolio-banner strong,
+.portfolio-banner span {
+  display: block;
+}
+.portfolio-banner span {
+  margin-top: 4px;
+  color: #d3e6de;
+}
+.portfolio-banner a {
+  color: white;
+  white-space: nowrap;
+}
+.portfolio-banner button {
+  padding: 7px 12px;
+  background: white;
+  border: 0;
+  border-radius: 6px;
+  white-space: nowrap;
+  color: #163e35;
+  cursor: pointer;
+}
+body:has(.portfolio-banner) .sidebar {
+  top: 76px;
+  height: calc(100dvh - 76px);
+}
+@media (max-width: 700px) {
+  .portfolio-banner {
+    flex-wrap: wrap;
+    padding: 10px 16px;
+    gap: 10px;
+  }
+  .portfolio-banner div {
+    flex-basis: 100%;
+  }
+  body:has(.portfolio-banner) .sidebar {
+    top: 0;
+    height: 100dvh;
+  }
+}
