@@ -134,3 +134,9 @@ Coverage includes concurrent claims, expired leases, stale completion, real HTTP
 - [API reference](docs/API.md)
 - [Backend implementation status](docs/BACKEND-ROADMAP.md)
 - [Operations and backup runbook](docs/OPERATIONS.md)
+
+## Author
+
+[Cynthia Owolabi](https://github.com/adebolaowolabi32), Senior Full Stack Engineer with experience across backend, frontend, platforms and applied AI.
+
+[Portfolio and experience](https://adebolaowolabi32.github.io/) · [Current CVs](https://adebolaowolabi32.github.io/resume.html)
