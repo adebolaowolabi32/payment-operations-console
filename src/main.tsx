@@ -91,16 +91,14 @@ function Login({ onLogin }: { onLogin: () => void }) {
           LedgerDesk<span className="brand-dot">.</span>
         </div>
         <div>
-          <p className="eyebrow">PAYMENT OPERATIONS, CONSIDERED.</p>
+          <p className="eyebrow">PAYMENT OPERATIONS DEMO</p>
           <h1>
-            Every payment.
-            <br />A clear path
-            <br />
-            <em>forward.</em>
+            Follow a payment <br />
+            from request <br /> <em>to receipt.</em>
           </h1>
           <p>
-            A workspace for careful approvals, clear accountability, and
-            reliable payment processing.
+            Review a payment request and see what happens when the provider
+            takes too long to respond.
           </p>
           <div className="login-pills">
             <span>
@@ -118,9 +116,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
       <section className="login-form">
         <div className="demo-label">INTERACTIVE DEMO · SYNTHETIC DATA</div>
         <h2>Welcome to your workspace</h2>
-        <p className="muted">
-          Choose a role and explore the payment lifecycle.
-        </p>
+        <p className="muted">Choose a role to create or review a payment.</p>
         <div className="demo-roles">
           {people.map((p) => (
             <button
@@ -511,9 +507,9 @@ function App() {
               <h1>{page === "Overview" ? "Payment overview" : page}</h1>
               <p className="muted">
                 {page === "Overview"
-                  ? "A clear view of your payments. Every step accounted for."
+                  ? "Check payment totals and recent activity."
                   : page === "Approvals"
-                    ? "Review the details. Keep every decision accountable."
+                    ? "Review pending requests before approving or rejecting them."
                     : page === "Payments"
                       ? "Track every payment from request to confirmation."
                       : page === "Audit trail"
@@ -846,15 +842,13 @@ function App() {
                 <AuditList events={data.audit.slice(0, 4)} />
               </section>
               <section className="panel flow-panel">
-                <p className="eyebrow">BUILT-IN ACCOUNTABILITY</p>
+                <p className="eyebrow">HOW APPROVAL WORKS</p>
                 <h2>
-                  One request.
-                  <br />
-                  Two independent decisions.
+                  Someone else <br /> reviews your request.
                 </h2>
                 <p>
-                  Create, review, and process. Every step leaves a record you
-                  can follow.
+                  The person who creates a payment cannot approve it. Its
+                  history records each decision.
                 </p>
                 <div className="flow">
                   <span>
@@ -973,18 +967,16 @@ function App() {
                         )
                       }
                     >
-                      <option value="healthy">
-                        Healthy — confirm payments
-                      </option>
+                      <option value="healthy">Healthy: confirm payments</option>
                       <option value="offline">
-                        Unavailable — exercise bounded retries
+                        Unavailable: retry failed requests
                       </option>
                       <option value="decline">Permanently decline</option>
                       <option value="lookup_offline">
                         Accept, then lose access to status
                       </option>
                       <option value="timeout_once">
-                        Accept, then time out — exercise reconciliation
+                        Accept, then time out: check the outcome
                       </option>
                     </select>
                   </label>

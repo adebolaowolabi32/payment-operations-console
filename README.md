@@ -1,8 +1,10 @@
 # LedgerDesk
 
-A payment operations console by Cynthia Owolabi. Create a request, have an independent reviewer approve it, and follow processing through confirmation or recovery. All companies and payments are synthetic; the provider simulator moves no real funds.
+I built LedgerDesk to work through a common payment problem: a provider accepts a transfer, but its response never arrives. The app keeps that payment pending while it checks what happened. Retrying immediately could pay twice.
 
-**[Try the interactive demo](https://adebolaowolabi32.github.io/payment-operations-console/)** — no sign-up or installation.
+You can create a request and have another person approve it, then follow its processing history. The companies and payments are fictional. No real money moves.
+
+**[Try the interactive demo](https://adebolaowolabi32.github.io/payment-operations-console/)**. No sign-up or installation.
 
 ![LedgerDesk portfolio preview](docs/portfolio-desktop.png)
 
@@ -68,9 +70,9 @@ All seeded accounts use the local demo password `LedgerDemo!2026`:
 4. Watch **Confirming outcome** payments reconcile. An unresolved payment cannot be manually resubmitted.
 5. Switch Amara from Cedar Finance to Harbor Labs to see isolated payment records. Use **Account** to invite members, change roles, deactivate membership, or rotate a password.
 
-The UI retains the existing visual design, mobile payment cards, draft protection, and review step. Payment filters and sorting now run on the server. Previous/next controls access bounded payment, beneficiary, audit, and per-payment history pages. Dashboard totals cover the whole workspace, regardless of the current page.
+The server handles filtering and sorting. Payment lists and history are paginated, while dashboard totals cover the whole workspace. On mobile, payments appear as cards. Unsubmitted drafts stay in place while you review them.
 
-## Backend guarantees and tradeoffs
+## How the backend handles payments
 
 - **Independent approval:** administrators cannot approve their own requests. Version checks reject conflicting reviews.
 - **Atomic writes:** approval, its audit event, and its processing job commit together. An insertion failure rolls back the transaction.
@@ -137,6 +139,6 @@ Coverage includes concurrent claims, expired leases, stale completion, real HTTP
 
 ## Author
 
-[Cynthia Owolabi](https://github.com/adebolaowolabi32), Senior Full Stack Engineer with experience across backend, frontend, platforms and applied AI.
+Built by [Cynthia Owolabi](https://github.com/adebolaowolabi32).
 
 [Portfolio and experience](https://adebolaowolabi32.github.io/) · [Current CVs](https://adebolaowolabi32.github.io/resume.html)
