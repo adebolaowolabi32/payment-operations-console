@@ -28,7 +28,7 @@ Already have PostgreSQL? Create a **new, empty database** and a login that owns 
 export DATABASE_URL='postgresql://YOUR_USER:YOUR_PASSWORD@127.0.0.1:5432/YOUR_DATABASE'
 ```
 
-In PowerShell, use `$env:DATABASE_URL = 'postgresql://...'`. Run this in each terminal that starts the app or a worker. The application reads environment variables; merely creating a `.env` file does not load it.
+In PowerShell, use `$env:DATABASE_URL = 'postgresql://...'`. Run this in each terminal that starts the app or a worker. The application reads environment variables; load any `.env` file explicitly before starting the process.
 
 ## 3. Start the application
 
@@ -38,7 +38,7 @@ npm run dev
 
 This starts the React frontend, API/worker, and HTTP provider simulator together. Open **http://127.0.0.1:5173**. If Vite prints a different port, use the printed address. PostgreSQL migrations and fictional demo accounts are created automatically on first startup.
 
-Choose a role on the login screen. The local password is `LedgerDemo!2026`. Start with Maya (maker), create a payment, then sign out and use Daniel (checker) to approve it. No real money moves.
+Choose a role on the login screen. The local password is `LedgerDemo!2026`. Start with Maya (maker), create a payment, then sign out and use Daniel (checker) to approve it. Transfers are simulated.
 
 ## Using a VM or remote server
 
@@ -48,7 +48,7 @@ The services listen on localhost. To open the demo in your laptop’s browser, r
 ssh -L 5173:127.0.0.1:5173 YOUR_USER@YOUR_VM_ADDRESS
 ```
 
-Then open http://127.0.0.1:5173 **on your laptop**. Vite proxies API calls, so you do not need to expose PostgreSQL or the provider port. If local port 5173 is occupied, use `-L 5174:127.0.0.1:5173` and browse localhost:5174.
+Then open http://127.0.0.1:5173 **on your laptop**. Vite proxies API calls, keeping PostgreSQL and the provider on private ports. If local port 5173 is occupied, use `-L 5174:127.0.0.1:5173` and browse localhost:5174.
 
 ## Run the compiled app
 
@@ -85,7 +85,7 @@ npx playwright install --with-deps chromium
 npm run test:e2e
 ```
 
-Tests need access to PostgreSQL. The backup test also needs `pg_dump`, `pg_restore`, and a test database role with `CREATEDB`. Install PostgreSQL client tools of the same or newer major version than your server. Use `TEST_DATABASE_URL` to point checks at a separate test database. Tests create uniquely named schemas; they do not clear your application data.
+Tests need access to PostgreSQL. The backup test also needs `pg_dump`, `pg_restore`, and a test database role with `CREATEDB`. Install PostgreSQL client tools of the same or newer major version than your server. Use `TEST_DATABASE_URL` to point checks at a separate test database. Tests use uniquely named schemas and preserve application data.
 
 ## Stop and restart
 
@@ -102,12 +102,12 @@ Restart with `docker compose up -d postgres` and `npm run dev`. Your database vo
 | Symptom                                   | What to check                                                                                                                                           |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ECONNREFUSED` on 5432                    | PostgreSQL is running and healthy; `DATABASE_URL` uses the correct host/port.                                                                           |
-| Database password authentication failed   | Use credentials for your own fresh demo database. The Compose defaults do not apply to an unrelated existing PostgreSQL instance.                       |
+| Database password authentication failed   | Use credentials for your own fresh demo database. Existing PostgreSQL instances use their own credentials.                       |
 | Port 5432 is already allocated            | Use your existing PostgreSQL with a separate database, or change Compose’s host port and match it in `DATABASE_URL`. Do not stop an unrelated database. |
 | `node:sqlite` cannot be imported          | Check the supported Node version.                                                                                                                       |
 | Missing table or migration failure        | The database user owns the target schema and can create tables/functions. Startup errors report migration problems.                                     |
 | API works but browser cannot reach the VM | Set up SSH forwarding and browse your laptop’s forwarded localhost port.                                                                                |
 | Payments remain queued                    | Keep the API’s combined worker or a separate worker running, plus `npm run provider`. Check `/api/ready`.                                               |
-| Invitation email does not arrive          | Configure `DELIVERY_URL` and `DELIVERY_TOKEN`; the local demo queues messages but does not include a live mail service.                                 |
+| Invitation email does not arrive          | Configure `DELIVERY_URL` and `DELIVERY_TOKEN`; the local demo queues messages for a separately configured mail service.                                 |
 
 This guide covers local installation. Hosted deployment additionally requires HTTPS, explicit secrets, account provisioning, and configured external services; see [configuration](../README.md#configuration) and [operations](OPERATIONS.md).
