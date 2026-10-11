@@ -12,7 +12,7 @@ You can create a request and have another person approve it, then follow its pro
 
 The GitHub Pages preview runs entirely in your browser with fictional payments. Choose Maya to create a request, sign out and choose Daniel to approve it, or explore as Amara to change the simulated provider behavior. Search, filter, page through payments, inspect receipts and history, and reset the demo whenever you like.
 
-Changes persist in this browser when local storage is available; restricted browsers use a temporary session. Processing advances while the workspace is open. Provider outcomes and queue metrics are simulated. There are no API calls, real transfers, hosted backend, database, account recovery, invitations, or password management in this preview. Demo roles illustrate the workflow; browser state is not a security boundary. The full application below implements server-side permissions, PostgreSQL persistence, concurrent workers, and operational telemetry.
+Changes persist in this browser when local storage is available; restricted browsers use a temporary session. Processing advances while the workspace is open. Provider outcomes and queue metrics are simulated. The preview does not connect to a backend or move money. Its role switcher demonstrates the workflow; server-side permissions and account management are available in the local application. The full application below implements server-side permissions, PostgreSQL persistence, concurrent workers, and operational telemetry.
 
 To run the same static preview locally:
 
@@ -128,7 +128,7 @@ npm run benchmark
 
 Tests require PostgreSQL. The test role must create/drop schemas; the backup test additionally creates a uniquely named scratch database and needs `CREATEDB`, `pg_dump`, and `pg_restore`. The PostgreSQL client major version must be at least the server’s. Tests never reset the application schema: they create and remove randomized fixtures. Browser checks use separate API/provider ports (3002/3004) and a temporary schema and receipt database.
 
-Coverage includes concurrent claims, expired leases, stale completion, real HTTP response loss plus simulator restart, permanent declines, unavailable lookups, duplicate callbacks, rollback, cross-workspace access, credential revocation, invitations/recovery, pagination beyond 500 events, delivery/export retry, trace continuity, and backup restoration. Browser checks cover desktop/mobile create-and-approve flows, filtering, drafts, workspace switching, and membership changes.
+Tests exercise the failure paths that matter most here: a provider accepts a transfer but loses the response, a worker finishes after its claim expires, and a callback arrives twice. Other checks cover approval permissions, account recovery, delivery retries and database restoration. Browser tests follow payments from creation through approval on desktop and mobile. See the [backend implementation notes](docs/BACKEND-ROADMAP.md) for the coverage breakdown.
 
 [Query benchmark](docs/QUERY-BENCHMARK.json) records a reproducible 10,000-payment fixture, bounded response bytes, and an actual PostgreSQL query plan. It is a local sample, not a production capacity estimate.
 
